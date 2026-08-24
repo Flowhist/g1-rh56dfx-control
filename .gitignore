@@ -1,6 +1,8 @@
 /build/
 /Testing/
 /log/
+/.tools/
+/.github-cli/
 
 *.o
 *.a
