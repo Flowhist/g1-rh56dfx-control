@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.10)
+project(rh56dfx_minimal_examples)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CTest)
+
+find_package(unitree_sdk2 REQUIRED)
+
+add_executable(hand_open_close hand_open_close.cpp)
+target_link_libraries(hand_open_close unitree_sdk2)
+
+add_executable(hand_single_joint hand_single_joint.cpp)
+target_link_libraries(hand_single_joint unitree_sdk2)
+
+add_executable(hand_state_monitor hand_state_monitor.cpp)
+target_link_libraries(hand_state_monitor unitree_sdk2)
+
+add_executable(hand_serial_probe hand_serial_probe.cpp)
+
+add_executable(hand_readonly_state_service hand_readonly_state_service.cpp)
+target_link_libraries(hand_readonly_state_service unitree_sdk2)
+
+add_executable(hand_command_safety_test hand_command_safety_test.cpp)
+add_test(NAME hand_command_safety COMMAND hand_command_safety_test)
+
+add_executable(rh56_protocol_test rh56_protocol_test.cpp)
+add_test(NAME rh56_protocol COMMAND rh56_protocol_test)

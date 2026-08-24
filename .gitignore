@@ -1,0 +1,9 @@
+/build/
+/Testing/
+/log/
+
+*.o
+*.a
+*.so
+*.swp
+*~

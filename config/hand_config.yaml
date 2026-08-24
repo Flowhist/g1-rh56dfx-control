@@ -1,0 +1,36 @@
+hand:
+  right_device: /dev/inspire_right
+  left_device: /dev/inspire_left
+
+dds:
+  command_topic: rt/inspire/cmd
+  state_topic: rt/inspire/state
+
+  # Usually not required for programs running entirely on the Jetson.
+  # Set explicitly when an application needs a specific DDS network interface.
+  network_interface: ""
+
+control:
+  min_position: 0.0
+  max_position: 1.0
+
+  # Conservative project-level placeholder.
+  # Tune after measuring the actual control loop and hand behavior.
+  max_step_per_command: 0.05
+
+  # Suggested initial watchdog placeholder.
+  command_timeout_ms: 500
+
+joint_order:
+  - right_pinky
+  - right_ring
+  - right_middle
+  - right_index
+  - right_thumb_bend
+  - right_thumb_rotation
+  - left_pinky
+  - left_ring
+  - left_middle
+  - left_index
+  - left_thumb_bend
+  - left_thumb_rotation

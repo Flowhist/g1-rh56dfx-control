@@ -1,0 +1,22 @@
+# Persistent RH56DFX device aliases for Unitree G1
+#
+# TEMPLATE ONLY.
+#
+# Inspect actual devices:
+#
+#   udevadm info -a -n /dev/ttyUSB1
+#   udevadm info -a -n /dev/ttyUSB2
+#
+# Prefer immutable unique attributes such as ATTRS{serial}.
+#
+# If adapters do not expose unique serial numbers, identify a stable
+# alternative such as USB topology. Verify across reboot before use.
+#
+# Example:
+#
+# SUBSYSTEM=="tty", ATTRS{serial}=="ABC123", SYMLINK+="inspire_right", MODE="0660"
+#
+# Replace TODO values with verified identifiers.
+
+# SUBSYSTEM=="tty", ATTRS{serial}=="TODO_RIGHT_SERIAL", SYMLINK+="inspire_right", MODE="0660"
+# SUBSYSTEM=="tty", ATTRS{serial}=="TODO_LEFT_SERIAL",  SYMLINK+="inspire_left",  MODE="0660"
