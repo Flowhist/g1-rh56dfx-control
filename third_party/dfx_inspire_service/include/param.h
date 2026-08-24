@@ -1,0 +1,66 @@
+#ifndef PARAM_H
+#define PARAM_H
+
+#include <stdint.h>
+#include <iostream>
+#include <chrono>
+#include <spdlog/spdlog.h>
+#include <boost/program_options.hpp>
+
+namespace param
+{
+
+namespace po = boost::program_options;
+
+inline std::string serial_port;
+inline std::string right_serial;
+inline std::string left_serial;
+inline std::string network;
+inline std::string ns;
+inline float threhold;
+
+po::variables_map helper(int argc, char** argv)
+{
+#ifndef NDEBUG
+  spdlog::set_level(spdlog::level::debug);
+#else
+  spdlog::set_level(spdlog::level::info);
+#endif
+
+
+  po::options_description desc("Unitree H1 Inspire Hand Serial to DDS");
+  desc.add_options()
+    ("help,h", "produce help message")
+    ("serial,s", po::value<std::string>(&serial_port)->default_value("/dev/ttyUSB0"), "serial port")
+    ("right-serial", po::value<std::string>(&right_serial)->default_value(
+        "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if01-port0"),
+        "G1 right-hand serial port")
+    ("left-serial", po::value<std::string>(&left_serial)->default_value(
+        "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if02-port0"),
+        "G1 left-hand serial port")
+    ("network", po::value<std::string>(&network)->default_value(""), "DDS network interface")
+    ("namespace", po::value<std::string>(&ns)->default_value("inspire"), "DDS topic namespace")
+    ;
+
+  po::variables_map vm;
+  po::store(po::parse_command_line(argc, argv, desc), vm);
+  po::notify(vm);
+
+  if (vm.count("help"))
+  {
+    std::cout << desc << std::endl;
+    exit(0);
+  }
+
+  if(ns.empty())
+  {
+    spdlog::error("Namespace cannot be empty");
+    exit(1);
+  }
+
+  return vm;
+}
+
+}
+
+#endif // PARAM_H

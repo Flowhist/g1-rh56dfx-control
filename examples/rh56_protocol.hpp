@@ -9,6 +9,7 @@
 namespace rh56 {
 
 using Position = std::array<float, 6>;
+using JointMask = std::array<bool, 6>;
 using ReadRequest = std::array<uint8_t, 9>;
 using ReadResponse = std::array<uint8_t, 20>;
 using WriteRequest = std::array<uint8_t, 20>;
@@ -32,16 +33,16 @@ inline ReadRequest MakeReadPosition(uint8_t id)
 inline uint16_t EncodePosition(float normalized)
 {
     normalized = std::clamp(normalized, 0.0f, 1.0f);
-    return static_cast<uint16_t>(
-        std::lround((1.0f - normalized) * 1000.0f));
+    return static_cast<uint16_t>(std::lround(normalized * 1000.0f));
 }
 
 inline float DecodePosition(uint16_t raw)
 {
-    return 1.0f - std::clamp(raw, uint16_t{0}, uint16_t{1000}) / 1000.0f;
+    return std::clamp(raw, uint16_t{0}, uint16_t{1000}) / 1000.0f;
 }
 
-inline WriteRequest MakeWritePosition(uint8_t id, const Position& position)
+inline WriteRequest MakeWritePosition(uint8_t id, const Position& position,
+                                      const JointMask& mask)
 {
     WriteRequest request{};
     request[0] = 0xEB;
@@ -52,12 +53,20 @@ inline WriteRequest MakeWritePosition(uint8_t id, const Position& position)
     request[5] = 0xCE;
     request[6] = 0x05;
     for (std::size_t i = 0; i < position.size(); ++i) {
-        const uint16_t raw = EncodePosition(position[i]);
+        const uint16_t raw =
+            mask[i] ? EncodePosition(position[i]) : uint16_t{0xFFFF};
         request[7 + 2 * i] = static_cast<uint8_t>(raw & 0xFF);
         request[8 + 2 * i] = static_cast<uint8_t>(raw >> 8);
     }
     request.back() = Checksum(request.data(), request.size());
     return request;
+}
+
+inline WriteRequest MakeWritePosition(uint8_t id, const Position& position)
+{
+    JointMask all{};
+    all.fill(true);
+    return MakeWritePosition(id, position, all);
 }
 
 inline bool ParsePosition(const ReadResponse& response, uint8_t id,

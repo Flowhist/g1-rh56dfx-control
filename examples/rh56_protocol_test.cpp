@@ -30,13 +30,13 @@ int main()
                        0x0A, 0x06, 0x0C, 0x32},
            "read-position frame is exact");
 
-    Expect(rh56::EncodePosition(1.0f) == 0, "open encodes as raw zero");
-    Expect(rh56::EncodePosition(0.0f) == 1000,
-           "closed encodes as raw one thousand");
-    Expect(rh56::EncodePosition(0.75f) == 250,
-           "normalized command uses inverse raw angle");
-    Expect(Near(rh56::DecodePosition(250), 0.75f),
-           "raw state decodes to canonical convention");
+    Expect(rh56::EncodePosition(0.0f) == 0, "closed encodes as raw zero");
+    Expect(rh56::EncodePosition(1.0f) == 1000,
+           "open encodes as raw one thousand");
+    Expect(rh56::EncodePosition(0.75f) == 750,
+           "normalized command follows the official raw direction");
+    Expect(Near(rh56::DecodePosition(250), 0.25f),
+           "raw state decodes to the official Unitree convention");
 
     rh56::Position command{1.0f, 0.0f, 0.75f, 0.5f, -1.0f, 2.0f};
     const auto write = rh56::MakeWritePosition(1, command);
@@ -44,12 +44,20 @@ int main()
            "write-position frame header is exact");
     Expect(write[5] == 0xCE && write[6] == 0x05,
            "write-position register is ANGLE_SET");
-    Expect(write[7] == 0x00 && write[8] == 0x00,
-           "open command bytes are zero");
-    Expect(write[9] == 0xE8 && write[10] == 0x03,
-           "closed command bytes are 1000 little-endian");
+    Expect(write[7] == 0xE8 && write[8] == 0x03,
+           "open command bytes are 1000 little-endian");
+    Expect(write[9] == 0x00 && write[10] == 0x00,
+           "closed command bytes are zero");
     Expect(write.back() == rh56::Checksum(write.data(), write.size()),
            "write-position checksum is exact");
+
+    rh56::JointMask index_only{};
+    index_only[3] = true;
+    const auto masked = rh56::MakeWritePosition(1, command, index_only);
+    Expect(masked[7] == 0xFF && masked[8] == 0xFF,
+           "unselected joints encode as no-change");
+    Expect(masked[13] == 0xF4 && masked[14] == 0x01,
+           "selected joint encodes its target");
 
     rh56::ReadResponse response{
         0x90, 0xEB, 0x01, 0x0F, 0x11, 0x0A, 0x06,
@@ -59,9 +67,9 @@ int main()
     rh56::Position decoded{};
     Expect(rh56::ParsePosition(response, 1, decoded),
            "valid position response is accepted");
-    Expect(Near(decoded[0], 0.75f) && Near(decoded[1], 0.5f) &&
-               Near(decoded[2], 0.0f) && Near(decoded[3], 1.0f),
-           "position response uses canonical direction");
+    Expect(Near(decoded[0], 0.25f) && Near(decoded[1], 0.5f) &&
+               Near(decoded[2], 1.0f) && Near(decoded[3], 0.0f),
+           "position response uses the official Unitree direction");
 
     response.back() ^= 0x01;
     Expect(!rh56::ParsePosition(response, 1, decoded),

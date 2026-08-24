@@ -1,126 +1,84 @@
-# Unitree G1 + Inspire RH56DFX — Jetson-First Onboarding
+# Unitree G1 · Inspire RH56DFX
 
-This package is the recommended starting point for developing two Inspire RH56DFX dexterous hands on a Unitree G1.
+Minimal G1 hand-control workspace based on Unitree's official
+[`dfx_inspire_service`](https://github.com/unitreerobotics/dfx_inspire_service).
 
-## Default development model
+## Hardware mapping
 
-**Develop and run the hand-control stack directly on the G1 onboard Jetson.**
+| Hand | Stable serial path | RH56 ID |
+|---|---|---:|
+| Right | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if01-port0` | 1 |
+| Left | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if02-port0` | 1 |
 
-Your Windows/macOS/Linux development machine is only used as a development terminal/IDE through SSH or VS Code Remote SSH.
+Official Unitree position convention: `q=0` closed, `q=1` open. The value is
+actuator position/allowed finger travel, not a measured anatomical joint pose.
+Opening releases the passive mechanism, so gravity and contact can determine the
+visible finger pose.
 
-```text
-Developer PC
-    |
-    | SSH / Remote IDE
-    v
-G1 Jetson
-├── source code
-├── unitree_sdk2
-├── dfx_inspire_service
-├── hand wrapper / safety layer
-└── RH56DFX runtime
-        |
-        | RS485
-        v
-   Left + Right RH56DFX
+## Build
+
+The Jetson already has the required Unitree SDK2, Boost, Eigen and spdlog.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+(cd build && ctest --output-on-failure)
 ```
 
-No WSL or local Unitree SDK installation is required for the basic hand-development workflow.
+No system installation is required.
 
-Later, if a VLA or other heavy model runs on an external GPU machine:
+## Official dual-hand service
 
-```text
-External GPU PC
-VLA / Teleoperation / Planner
-        |
-        | Ethernet + DDS
-        v
-G1 Jetson
-Hand Service / Safety / Hardware
-        |
-        v
-RH56DFX
+```bash
+./build/third_party/dfx_inspire_service/inspire_g1
 ```
 
-SSH is for development, deployment, startup and debugging.
+Optional arguments:
 
-DDS is the runtime robot-control communication path.
-
----
-
-## First-day workflow
-
-1. Read:
-   - `docs/01_ARCHITECTURE.md`
-   - `docs/02_JETSON_DEVELOPMENT.md`
-   - `docs/03_RH56DFX_DEVELOPER_GUIDE.md`
-2. SSH into the G1 Jetson.
-3. Run:
-   ```bash
-   bash scripts/check_hardware.sh
-   ```
-4. Verify both RH56DFX serial devices.
-5. Install/verify `unitree_sdk2`.
-6. Build/verify `dfx_inspire_service`.
-7. Run Unitree's official hand example.
-8. Run the minimal examples in `examples/`.
-9. Confirm the canonical 12-D hand interface in `interface/HAND_INTERFACE.md`.
-10. Only then integrate ROS 2, teleoperation or VLA.
-
----
-
-## Project philosophy
-
-The RH56DFX stack is treated as a small, independent robot-side subsystem.
-
-The upper-level application should only see:
-
-```text
-command: q[12]
-state:   q[12]
+```bash
+./build/third_party/dfx_inspire_service/inspire_g1 \
+  --right-serial /dev/serial/by-id/...if01-port0 \
+  --left-serial /dev/serial/by-id/...if02-port0 \
+  --network eth0 \
+  --namespace inspire
 ```
 
-and should not need to know:
+DDS interface:
 
-```text
-/dev/ttyUSB*
-RS485 registers
-baud rate
-USB enumeration
-RH56 low-level packet format
+- command: `rt/inspire/cmd`, `unitree_go::msg::dds_::MotorCmds_`;
+- state: `rt/inspire/state`, `unitree_go::msg::dds_::MotorStates_`;
+- order: right six axes, then left six axes;
+- per-hand order: pinky, ring, middle, index, thumb bend, thumb rotation.
+
+Only run the dual-hand service when both arms and hands are safe to command.
+
+## Manual one-axis test
+
+Edit [`config/hand_test.yaml`](config/hand_test.yaml), then run:
+
+```bash
+./scripts/run_hand_test.py
 ```
 
----
+The tool controls only the selected serial hand and returns to its starting
+actuator position. Validate without motion using:
 
-## Canonical hand ordering
-
-```text
-0   right_pinky
-1   right_ring
-2   right_middle
-3   right_index
-4   right_thumb_bend
-5   right_thumb_rotation
-
-6   left_pinky
-7   left_ring
-8   left_middle
-9   left_index
-10  left_thumb_bend
-11  left_thumb_rotation
+```bash
+./scripts/run_hand_test.py --dry-run
 ```
 
-Current Unitree example convention:
+Best-effort software stop:
 
-```text
-0.0 = close
-1.0 = open
+```bash
+./scripts/hand_estop.sh left
 ```
 
----
+This is not a hardware emergency stop. Use robot power removal or the physical
+E-stop for a real emergency.
 
-## Important
+## Sources retained
 
-`udev/99-inspire-hands.rules` is a template and MUST be customized on the actual G1 before installation.
-
-Do not permanently depend on `/dev/ttyUSB1` and `/dev/ttyUSB2`.
+- `third_party/dfx_inspire_service/`: official Unitree service, with only the
+  serial-path and initialization adaptations recorded in `UPSTREAM.md`;
+- `examples/`: compact protocol tests and isolated one-axis safety tools;
+- `因时机器人仿人五指灵巧手--RH56用户手册V1.09cn.pdf`: vendor register manual.
