@@ -14,3 +14,7 @@ add_test(NAME rh56_protocol COMMAND rh56_protocol_test)
 add_executable(hand_single_joint_safe hand_single_joint_safe.cpp)
 
 add_executable(hand_hold_position hand_hold_position.cpp)
+
+add_executable(hand_diagnostics_readonly hand_diagnostics_readonly.cpp)
+target_include_directories(hand_diagnostics_readonly PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/dfx_inspire_service/include)

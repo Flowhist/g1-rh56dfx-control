@@ -2,6 +2,9 @@
 #define INSPIRE_H
 
 #include <eigen3/Eigen/Dense>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "SerialPort.h"
@@ -12,6 +15,9 @@ namespace inspire
 class InspireHand
 {
 public:
+  using RawValues = std::array<int16_t, 6>;
+  using StatusValues = std::array<uint8_t, 6>;
+
   InspireHand(SerialPort::SharedPtr serial = nullptr, id_t id = 0)
   : serial_(serial), id(id)
   {
@@ -132,6 +138,12 @@ public:
     serial_->recv(recvBuff, 9);
   }
 
+  /** Set all six velocity limits. Values are in the firmware range [0, 1000]. */
+  bool SetVelocity(const RawValues& velocity)
+  {
+    return WriteWords(0x05F2, velocity, 1000);
+  }
+
   /**
    * @brief Get the force control threshold
    *
@@ -168,6 +180,12 @@ public:
     serial_->recv(recvBuff, 9);
   }
 
+  /** Set firmware contact-force thresholds in grams, range [0, 1000]. */
+  bool SetForceLimit(const RawValues& force)
+  {
+    return WriteWords(0x05DA, force, 1000);
+  }
+
   /**
    * @brief Get the force of each finger
    *
@@ -193,6 +211,42 @@ public:
     f(5) = int16_t(recvBuff[17] | (recvBuff[18] << 8)) / 1000. * 9.8;
 
     return 0;
+  }
+
+  /** Read raw actuator currents in mA. */
+  int16_t GetCurrent(RawValues& current)
+  {
+    return ReadWords(0x063A, current);
+  }
+
+  /** Read unscaled force-sensor values in the firmware's native units. */
+  int16_t GetForceRaw(RawValues& force)
+  {
+    return ReadWords(0x062E, force);
+  }
+
+  /** Read one firmware error-bit byte for each actuator. */
+  int16_t GetError(StatusValues& error)
+  {
+    return ReadBytes(0x0646, error);
+  }
+
+  /** Read one state code (0, 1, 2, 3, 5, 6 or 7) for each actuator. */
+  int16_t GetStatus(StatusValues& status)
+  {
+    return ReadBytes(0x064C, status);
+  }
+
+  /** Read one temperature byte for each actuator. */
+  int16_t GetTemperature(StatusValues& temperature)
+  {
+    return ReadBytes(0x0652, temperature);
+  }
+
+  /** Set firmware current-protection thresholds in mA, range [0, 1500]. */
+  bool SetCurrentLimit(const RawValues& current_limit)
+  {
+    return WriteWords(0x03FC, current_limit, 1500);
   }
 
   /**
@@ -238,7 +292,89 @@ public:
 
   uint8_t id = 1;
 private:
-  uint8_t CheckSum(const uint8_t* data, uint8_t len)
+  int16_t ReadWords(uint16_t address, RawValues& values)
+  {
+    std::vector<uint8_t> cmd = {
+      0xEB, 0x90, id, 0x04, 0x11,
+      static_cast<uint8_t>(address & 0xFF),
+      static_cast<uint8_t>(address >> 8), 0x0C, 0x00};
+    cmd.back() = CheckSum(cmd.data(), cmd.size());
+    serial_->send(cmd.data(), cmd.size());
+
+    usleep(5000);
+    const size_t len = serial_->recv(recvBuff, 20);
+    if(!ValidReadResponse(len, address, 20)) return 1;
+
+    for(std::size_t i = 0; i < values.size(); ++i)
+      values[i] = static_cast<int16_t>(
+        static_cast<uint16_t>(recvBuff[7 + 2 * i]) |
+        (static_cast<uint16_t>(recvBuff[8 + 2 * i]) << 8));
+    return 0;
+  }
+
+  int16_t ReadBytes(uint16_t address, StatusValues& values)
+  {
+    std::vector<uint8_t> cmd = {
+      0xEB, 0x90, id, 0x04, 0x11,
+      static_cast<uint8_t>(address & 0xFF),
+      static_cast<uint8_t>(address >> 8), 0x06, 0x00};
+    cmd.back() = CheckSum(cmd.data(), cmd.size());
+    serial_->send(cmd.data(), cmd.size());
+
+    usleep(5000);
+    constexpr size_t response_size = 14;
+    const size_t len = serial_->recv(recvBuff, response_size);
+    if(!ValidReadResponse(len, address, response_size)) return 1;
+
+    for(std::size_t i = 0; i < values.size(); ++i)
+      values[i] = recvBuff[7 + i];
+    return 0;
+  }
+
+  bool WriteWords(uint16_t address, const RawValues& values, int16_t maximum)
+  {
+    for(const int16_t value : values)
+      if(value < 0 || value > maximum) return false;
+
+    uint8_t cmd[20]{};
+    cmd[0] = 0xEB;
+    cmd[1] = 0x90;
+    cmd[2] = id;
+    cmd[3] = 0x0F;
+    cmd[4] = 0x12;
+    cmd[5] = static_cast<uint8_t>(address & 0xFF);
+    cmd[6] = static_cast<uint8_t>(address >> 8);
+    for(std::size_t i = 0; i < values.size(); ++i) {
+      const uint16_t raw = static_cast<uint16_t>(values[i]);
+      cmd[7 + 2 * i] = static_cast<uint8_t>(raw & 0xFF);
+      cmd[8 + 2 * i] = static_cast<uint8_t>(raw >> 8);
+    }
+    cmd[19] = CheckSum(cmd, 20);
+    serial_->send(cmd, 20);
+    usleep(5000);
+    const size_t len = serial_->recv(recvBuff, 9);
+    return ValidWriteResponse(len, address);
+  }
+
+  bool ValidReadResponse(size_t len, uint16_t address, size_t expected) const
+  {
+    return len == expected && recvBuff[0] == 0x90 && recvBuff[1] == 0xEB &&
+      recvBuff[2] == id && recvBuff[4] == 0x11 &&
+      recvBuff[5] == static_cast<uint8_t>(address & 0xFF) &&
+      recvBuff[6] == static_cast<uint8_t>(address >> 8) &&
+      recvBuff[expected - 1] == CheckSum(recvBuff, expected);
+  }
+
+  bool ValidWriteResponse(size_t len, uint16_t address) const
+  {
+    return len == 9 && recvBuff[0] == 0x90 && recvBuff[1] == 0xEB &&
+      recvBuff[2] == id && recvBuff[4] == 0x12 &&
+      recvBuff[5] == static_cast<uint8_t>(address & 0xFF) &&
+      recvBuff[6] == static_cast<uint8_t>(address >> 8) &&
+      recvBuff[8] == CheckSum(recvBuff, 9);
+  }
+
+  uint8_t CheckSum(const uint8_t* data, uint8_t len) const
   {
     uint8_t sum = 0;
     for (int i = 2; i < len - 1; i++)

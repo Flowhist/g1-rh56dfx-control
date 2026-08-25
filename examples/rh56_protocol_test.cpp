@@ -75,6 +75,57 @@ int main()
     Expect(!rh56::ParsePosition(response, 1, decoded),
            "bad checksum is rejected");
 
+    const auto current_read = rh56::MakeRead(1, 0x063A, 0x0C);
+    Expect(current_read[5] == 0x3A && current_read[6] == 0x06 &&
+               current_read[7] == 0x0C,
+           "current read uses CURRENT register and twelve-byte payload");
+    const auto status_read = rh56::MakeRead(1, 0x064C, 0x06);
+    Expect(status_read[5] == 0x4C && status_read[6] == 0x06 &&
+               status_read[7] == 0x06,
+           "status read uses STATUS register and six-byte payload");
+    const auto error_read = rh56::MakeRead(1, 0x0646, 0x06);
+    Expect(error_read[5] == 0x46 && error_read[6] == 0x06 &&
+               error_read[7] == 0x06,
+           "error read uses ERROR register and six-byte payload");
+    const auto temperature_read = rh56::MakeRead(1, 0x0652, 0x06);
+    Expect(temperature_read[5] == 0x52 && temperature_read[6] == 0x06,
+           "temperature read uses TEMP register");
+
+    const rh56::RawValues current_limits{0, 250, 500, 750, 1000, 1500};
+    const auto limit_write = rh56::MakeWriteWords(1, 0x03FC, current_limits);
+    Expect(limit_write[5] == 0xFC && limit_write[6] == 0x03,
+           "current limit write uses CURRENT_LIMIT register");
+    Expect(limit_write[17] == 0xDC && limit_write[18] == 0x05,
+           "current limit values are encoded little-endian");
+    Expect(limit_write.back() ==
+               rh56::Checksum(limit_write.data(), limit_write.size()),
+           "current limit write checksum is exact");
+
+    rh56::ReadResponse current_response{
+        0x90, 0xEB, 0x01, 0x0F, 0x11, 0x3A, 0x06,
+        0x64, 0x00, 0xC8, 0x00, 0x2C, 0x01,
+        0x90, 0x01, 0xF4, 0x01, 0x58, 0x02, 0x00};
+    current_response.back() =
+        rh56::Checksum(current_response.data(), current_response.size());
+    rh56::RawValues currents{};
+    Expect(rh56::ParseWords(current_response, 1, 0x063A, currents),
+           "valid current response is accepted");
+    Expect(currents == rh56::RawValues{100, 200, 300, 400, 500, 600},
+           "current response preserves raw mA values");
+    Expect(!rh56::ParseWords(current_response, 1, 0x062E, currents),
+           "response from the wrong register is rejected");
+
+    rh56::ByteReadResponse status_response{
+        0x90, 0xEB, 0x01, 0x09, 0x11, 0x4C, 0x06,
+        0x00, 0x01, 0x02, 0x03, 0x05, 0x07, 0x00};
+    status_response.back() =
+        rh56::Checksum(status_response.data(), status_response.size());
+    rh56::ByteValues statuses{};
+    Expect(rh56::ParseBytes(status_response, 1, 0x064C, statuses),
+           "valid status response is accepted");
+    Expect(statuses == rh56::ByteValues{0, 1, 2, 3, 5, 7},
+           "all six status bytes are decoded");
+
     if (failures == 0)
         std::cout << "All RH56 protocol tests passed\n";
     return failures == 0 ? 0 : 1;

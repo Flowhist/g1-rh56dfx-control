@@ -1,9 +1,9 @@
 # One-joint RH56DFX test. Official Unitree position: 0=closed, 1=open.
 hand: left
-joint: thumb-bend
+joint: ring
 
 # Signed normalized travel. Positive opens; negative closes.
-delta: 0.1
+delta: 0.3
 
 # Time for the outward movement. Return uses the same duration.
 move_duration_ms: 5000
