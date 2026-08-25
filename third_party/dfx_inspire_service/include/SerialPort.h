@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <linux/serial.h>
 #include <unistd.h>
+#include <cerrno>
 #include <iostream>
 #include <memory>
 #include <chrono>
@@ -38,30 +39,41 @@ public:
 
   ssize_t recv(uint8_t* data, size_t len)
   {
-    FD_ZERO(&rSet_);
-    FD_SET(fd_, &rSet_);
-    ssize_t recv_len = 0;
-
-    switch (select(fd_ + 1, &rSet_, NULL, NULL, &timeout_))
+    size_t received = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms_);
+    while(received < len)
     {
-    case -1: // error
-      // std::cout << "communication error" << std::endl;
-      break;
-    case 0: // timeout
-      // std::cout << "timeout" << std::endl;
-      break;
-    default:
-      recv_len = ::read(fd_, data, len);
-      break;
-    }
+      const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - std::chrono::steady_clock::now());
+      if(remaining.count() <= 0) break;
 
-    return recv_len;
+      fd_set read_set;
+      FD_ZERO(&read_set);
+      FD_SET(fd_, &read_set);
+      timeval timeout;
+      timeout.tv_sec = remaining.count() / 1000000;
+      timeout.tv_usec = remaining.count() % 1000000;
+      const int ready = select(fd_ + 1, &read_set, NULL, NULL, &timeout);
+      if(ready == 0) break;
+      if(ready < 0)
+      {
+        if(errno == EINTR) continue;
+        break;
+      }
+
+      const ssize_t count = ::read(fd_, data + received, len - received);
+      if(count > 0)
+        received += static_cast<size_t>(count);
+      else if(count < 0 && errno != EINTR && errno != EAGAIN)
+        break;
+    }
+    return static_cast<ssize_t>(received);
   }
 
   void set_timeout(int timeout_ms)
   {
-    timeout_.tv_sec = timeout_ms / 1000;
-    timeout_.tv_usec = (timeout_ms % 1000) * 1000;
+    timeout_ms_ = timeout_ms;
   }
 
 private:
@@ -103,8 +115,7 @@ private:
   }
 
   int fd_;
-	fd_set rSet_;
-  timeval timeout_;
+  int timeout_ms_{2};
 
   std::queue<uint8_t> recv_queue;
   std::array<uint8_t, 1024> recv_buf;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rh56_protocol.hpp"
+#include "protocol.hpp"
 
 #include <array>
 #include <cerrno>

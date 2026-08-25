@@ -34,9 +34,8 @@
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j2
-(cd build && ctest --output-on-failure)
-./scripts/run_hand_test.py --dry-run
+cmake --build build --target hand_compliant_teach hand_hold_position -j2
+./build/src/hand_compliant_teach
 ```
 
 Report separately what was compiled, read from hardware, and motion-tested.

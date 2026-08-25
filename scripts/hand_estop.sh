@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELECTION="${1:-both}"
-HOLD_BIN="$ROOT_DIR/build/examples/hand_hold_position"
+HOLD_BIN="$ROOT_DIR/build/src/hand_hold_position"
 PID_FILE="$ROOT_DIR/run/hand_controller.pid"
 
 case "$SELECTION" in

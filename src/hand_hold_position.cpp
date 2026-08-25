@@ -1,7 +1,7 @@
 // Software stop: read each selected hand and command its current position.
 
-#include "rh56_readonly.hpp"
-#include "rh56_writer.hpp"
+#include "rh56/readonly.hpp"
+#include "rh56/writer.hpp"
 
 #include <iostream>
 #include <string>

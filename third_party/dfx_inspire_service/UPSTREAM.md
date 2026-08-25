@@ -10,7 +10,8 @@ Local G1 adaptations are intentionally small:
 - stable FTDI `by-id` paths as this robot's defaults;
 - zero-initialized command and state vectors;
 - type-safe six-axis APIs for raw force, current, error, status and temperature reads;
-- validated six-axis velocity, force-limit and current-limit writes.
+- validated six-axis velocity, force-limit and current-limit writes;
+- exact-length serial receives with a fresh total timeout for every frame.
 
 The additional RH56 register addresses and value ranges were cross-checked
 against the retained RH56 V1.09 vendor manual and the Correll Lab
