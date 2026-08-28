@@ -62,6 +62,34 @@ public:
         return ReadExact(response) && rh56::ParsePosition(response, id, position);
     }
 
+    bool ReadWords(uint16_t address, rh56::RawValues& values, uint8_t id = 1)
+    {
+        const auto request = rh56::MakeRead(id, address, 0x0C);
+        tcflush(fd_, TCIFLUSH);
+        if (write(fd_, request.data(), request.size()) !=
+            static_cast<ssize_t>(request.size()))
+            return false;
+        tcdrain(fd_);
+
+        rh56::ReadResponse response{};
+        return ReadExact(response) &&
+               rh56::ParseWords(response, id, address, values);
+    }
+
+    bool ReadBytes(uint16_t address, rh56::ByteValues& values, uint8_t id = 1)
+    {
+        const auto request = rh56::MakeRead(id, address, 0x06);
+        tcflush(fd_, TCIFLUSH);
+        if (write(fd_, request.data(), request.size()) !=
+            static_cast<ssize_t>(request.size()))
+            return false;
+        tcdrain(fd_);
+
+        rh56::ByteReadResponse response{};
+        return ReadExact(response) &&
+               rh56::ParseBytes(response, id, address, values);
+    }
+
 private:
     template <std::size_t N>
     bool ReadExact(std::array<uint8_t, N>& response)

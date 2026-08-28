@@ -13,6 +13,7 @@ using JointMask = std::array<bool, 6>;
 using ReadRequest = std::array<uint8_t, 9>;
 using ReadResponse = std::array<uint8_t, 20>;
 using ByteReadResponse = std::array<uint8_t, 14>;
+using ByteWriteRequest = std::array<uint8_t, 9>;
 using WriteRequest = std::array<uint8_t, 20>;
 using RawValues = std::array<int16_t, 6>;
 using ByteValues = std::array<uint8_t, 6>;
@@ -58,6 +59,16 @@ inline WriteRequest MakeWriteWords(uint8_t id, uint16_t address,
         request[7 + 2 * i] = static_cast<uint8_t>(raw & 0xFF);
         request[8 + 2 * i] = static_cast<uint8_t>(raw >> 8);
     }
+    request.back() = Checksum(request.data(), request.size());
+    return request;
+}
+
+inline ByteWriteRequest MakeWriteByte(uint8_t id, uint16_t address,
+                                      uint8_t value)
+{
+    ByteWriteRequest request{0xEB, 0x90, id, 0x04, 0x12,
+                             static_cast<uint8_t>(address & 0xFF),
+                             static_cast<uint8_t>(address >> 8), value, 0x00};
     request.back() = Checksum(request.data(), request.size());
     return request;
 }

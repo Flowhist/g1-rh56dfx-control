@@ -51,6 +51,32 @@ public:
                        const rh56::JointMask& mask, uint8_t id = 1)
     {
         const auto request = rh56::MakeWritePosition(id, position, mask);
+        return WriteAndAcknowledge(request, 0x05CE, id);
+    }
+
+    bool WriteWords(uint16_t address, const rh56::RawValues& values,
+                    int16_t maximum, uint8_t id = 1)
+    {
+        for (const int16_t value : values)
+            if (value < 0 || value > maximum)
+                return false;
+        const auto request = rh56::MakeWriteWords(id, address, values);
+        return WriteAndAcknowledge(request, address, id);
+    }
+
+    bool ClearErrors(uint8_t id = 1)
+    {
+        constexpr uint16_t clear_error_address = 0x03EC;
+        const auto request =
+            rh56::MakeWriteByte(id, clear_error_address, uint8_t{1});
+        return WriteAndAcknowledge(request, clear_error_address, id);
+    }
+
+private:
+    template <std::size_t N>
+    bool WriteAndAcknowledge(const std::array<uint8_t, N>& request,
+                             uint16_t address, uint8_t id)
+    {
         tcflush(fd_, TCIFLUSH);
         if (write(fd_, request.data(), request.size()) !=
             static_cast<ssize_t>(request.size()))
@@ -62,12 +88,12 @@ public:
             return false;
         return response[0] == 0x90 && response[1] == 0xEB &&
                response[2] == id && response[4] == 0x12 &&
-               response[5] == 0xCE && response[6] == 0x05 &&
+               response[5] == static_cast<uint8_t>(address & 0xFF) &&
+               response[6] == static_cast<uint8_t>(address >> 8) &&
                response.back() ==
                    rh56::Checksum(response.data(), response.size());
     }
 
-private:
     template <std::size_t N>
     bool ReadExact(std::array<uint8_t, N>& response)
     {
