@@ -83,6 +83,46 @@ int main()
         return 1;
     }
 
+    rh56::PoseRequest save_pose;
+    save_pose.action = "save";
+    save_pose.name = "thumb-safe";
+    save_pose.right = source.q;
+    save_pose.left = source.q;
+    save_pose.delays_ms = {0, 0, 0, 0, 300, 300};
+    save_pose.request_id = 80;
+    rh56::PoseRequest decoded_save_pose;
+    unitree::common::FromJsonString(
+        unitree::common::ToJsonString(save_pose), decoded_save_pose);
+    if (decoded_save_pose.action != save_pose.action ||
+        decoded_save_pose.name != save_pose.name ||
+        decoded_save_pose.right != save_pose.right ||
+        decoded_save_pose.left != save_pose.left ||
+        decoded_save_pose.delays_ms != save_pose.delays_ms ||
+        decoded_save_pose.request_id != save_pose.request_id) {
+        std::cerr << "PoseRequest JSON round trip failed\n";
+        return 1;
+    }
+
+    rh56::Pose pose;
+    pose.id = "pose-1";
+    pose.created = 1234;
+    pose.name = save_pose.name;
+    pose.right = save_pose.right;
+    pose.left = save_pose.left;
+    pose.delays_ms = save_pose.delays_ms;
+    rh56::PoseReply pose_list;
+    pose_list.message = "ok";
+    pose_list.poses = {pose};
+    rh56::PoseReply decoded_pose_list;
+    unitree::common::FromJsonString(
+        unitree::common::ToJsonString(pose_list), decoded_pose_list);
+    if (decoded_pose_list.poses.size() != 1 ||
+        decoded_pose_list.poses[0].id != pose.id ||
+        decoded_pose_list.poses[0].delays_ms != pose.delays_ms) {
+        std::cerr << "PoseReply JSON round trip failed\n";
+        return 1;
+    }
+
     std::cout << "hand_api_test: PASS\n";
     return 0;
 }

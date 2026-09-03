@@ -20,6 +20,7 @@ public:
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiGetState);
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiApplyGrip);
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiHold);
+        UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiPoses);
     }
 
     int32_t SetTargets(const SetTargetsRequest& request,
@@ -51,6 +52,31 @@ public:
     int32_t Hold(const HoldRequest& request, OperationReply& reply)
     {
         return CallAndDecode(kApiHold, request, reply);
+    }
+
+    int32_t Poses(const PoseRequest& request, PoseReply& reply)
+    {
+        return CallAndDecode(kApiPoses, request, reply);
+    }
+
+    int32_t ListPoses(PoseReply& reply)
+    {
+        PoseRequest request;
+        request.action = "list";
+        return Poses(request, reply);
+    }
+
+    int32_t ExecutePose(const std::string& id, const std::string& hand,
+                        uint64_t request_id, PoseReply& reply,
+                        uint32_t timeout_ms = 5000)
+    {
+        PoseRequest request;
+        request.action = "execute";
+        request.id = id;
+        request.hand = hand;
+        request.request_id = request_id;
+        request.timeout_ms = timeout_ms;
+        return Poses(request, reply);
     }
 
 private:

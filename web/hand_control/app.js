@@ -38,6 +38,11 @@ function validPoseValues(values) {
     values.every(value => Number.isFinite(value) && value >= 0 && value <= 1);
 }
 
+function validPoseDelays(values) {
+  return Array.isArray(values) && values.length === 6 &&
+    values.every(value => Number.isInteger(value) && value >= 0 && value <= 3000);
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, character => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -50,6 +55,13 @@ function poseBars(pose) {
   return [...pose.right, ...pose.left]
     .map(q => `<i style="height:${Math.max(2, Math.round((1 - q) * 100))}%"></i>`)
     .join("");
+}
+
+function delaySummary(delays) {
+  const active = delays
+    .map((delay, index) => delay ? `${JOINTS[index].name} +${delay} ms` : "")
+    .filter(Boolean);
+  return active.length ? active.join(" · ") : "全部同步";
 }
 
 function renderPoses() {
@@ -65,10 +77,37 @@ function renderPoses() {
         <div class="pose-preview" aria-label="双手弯曲程度预览">${poseBars(pose)}</div>
       </div>
       <div class="pose-actions">
-        <button class="pose-action replay" data-replay-pose="${pose.id}">复现</button>
+        <button class="pose-action replay" data-replay-pose="${pose.id}">执行</button>
         <button class="pose-action" data-rename-pose="${pose.id}">改名</button>
         <button class="pose-action delete" data-delete-pose="${pose.id}" aria-label="删除${escapeHtml(pose.name)}">×</button>
       </div>
+      <details class="pose-delay-panel">
+        <summary>
+          <span>关节启动延时</span>
+          <small>${escapeHtml(delaySummary(pose.delays_ms))}</small>
+        </summary>
+        <div class="delay-presets" role="group" aria-label="延时快捷设置">
+          <button type="button" data-delay-preset="${pose.id}:sync">全部同步</button>
+          <button type="button" data-delay-preset="${pose.id}:thumb-300">拇指 +300 ms</button>
+        </div>
+        <div class="pose-delay-grid">
+          ${JOINTS.map((joint, index) => `
+            <label>
+              <span>${joint.name}</span>
+              <span class="delay-input">
+                <input type="number" min="0" max="3000" step="50"
+                       value="${pose.delays_ms[index]}"
+                       data-pose-delay="${pose.id}:${index}"
+                       aria-label="${joint.name}启动延时">
+                <small>ms</small>
+              </span>
+            </label>`).join("")}
+        </div>
+        <div class="delay-footer">
+          <span>相对于动作开始时间</span>
+          <button type="button" data-save-delays="${pose.id}">保存延时</button>
+        </div>
+      </details>
     </article>`).join("");
 }
 
@@ -91,8 +130,12 @@ async function loadServerPoses() {
   const response = await fetch("/api/poses", { cache: "no-store" });
   const result = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
-  poses = Array.isArray(result.poses) ? result.poses.filter(pose =>
-    pose && validPoseValues(pose.right) && validPoseValues(pose.left)) : [];
+  poses = Array.isArray(result.poses) ? result.poses
+    .filter(pose => pose && validPoseValues(pose.right) && validPoseValues(pose.left))
+    .map(pose => ({
+      ...pose,
+      delays_ms: validPoseDelays(pose.delays_ms) ? pose.delays_ms : Array(6).fill(0),
+    })) : [];
 
   renderPoses();
 }
@@ -109,7 +152,7 @@ async function saveCurrentPose() {
     poses.unshift(result.pose);
     renderPoses();
     poseNameInput.value = "";
-    showToast(`${result.pose.name}已自动保存到本地文件`);
+    showToast(`${result.pose.name}已保存到控制服务`);
   } catch (error) {
     showToast(`保存失败：${error.message}`, true);
   }
@@ -126,14 +169,47 @@ async function replayPose(id) {
     return;
   }
   try {
-    for (const hand of ["right", "left"]) {
-      if (enabledHand(hand))
-        await postCommand({ hand, values: model[hand].map(value => value.toFixed(3)).join(",") });
-    }
-    showToast(`${pose.name}已复现`);
+    const result = await poseRequest("/api/poses/execute", {
+      id,
+      confirm: "execute-pose",
+    });
+    showToast(`${pose.name}已执行${result.duration_ms ? ` · 编排 ${result.duration_ms} ms` : ""}`);
   } catch (error) {
     setStatus("error", "姿势复现失败");
     showToast(error.message, true);
+  }
+}
+
+function delayInputs(id) {
+  return [...poseList.querySelectorAll(`[data-pose-delay^="${id}:"]`)];
+}
+
+async function savePoseDelays(id, preset) {
+  const pose = poses.find(item => item.id === id);
+  if (!pose) return;
+  const inputs = delayInputs(id);
+  if (inputs.length !== 6) return;
+
+  if (preset === "sync") inputs.forEach(input => { input.value = "0"; });
+  if (preset === "thumb-300") inputs.forEach((input, index) => {
+    input.value = index >= 4 ? "300" : "0";
+  });
+
+  const delays = inputs.map(input => Number(input.value));
+  if (!validPoseDelays(delays)) {
+    showToast("启动延时必须是 0–3000 ms 的整数", true);
+    return;
+  }
+  try {
+    const result = await poseRequest("/api/poses/delays", {
+      id,
+      delays_ms: delays.join(","),
+    });
+    poses = poses.map(item => item.id === id ? result.pose : item);
+    renderPoses();
+    showToast(`${pose.name}的启动延时已保存`);
+  } catch (error) {
+    showToast(`延时保存失败：${error.message}`, true);
   }
 }
 
@@ -648,9 +724,16 @@ poseList.addEventListener("click", event => {
   const replay = event.target.closest("[data-replay-pose]");
   const rename = event.target.closest("[data-rename-pose]");
   const remove = event.target.closest("[data-delete-pose]");
+  const saveDelays = event.target.closest("[data-save-delays]");
+  const preset = event.target.closest("[data-delay-preset]");
   if (replay) replayPose(replay.dataset.replayPose);
   if (rename) renamePose(rename.dataset.renamePose);
   if (remove) deletePose(remove.dataset.deletePose);
+  if (saveDelays) savePoseDelays(saveDelays.dataset.saveDelays);
+  if (preset) {
+    const [id, name] = preset.dataset.delayPreset.split(":");
+    savePoseDelays(id, name);
+  }
 });
 
 document.querySelectorAll("[data-register-panel]").forEach(panel => {

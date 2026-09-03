@@ -10,7 +10,6 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -38,6 +37,8 @@ namespace {
 
 constexpr std::size_t kMaximumRequestBytes = 64 * 1024;
 constexpr int16_t kMaximumGripCurrentMa = 300;
+constexpr uint32_t kMaximumPoseDelayMs = 3000;
+using JointDelays = std::array<uint32_t, rh56::kJointCount>;
 
 volatile std::sig_atomic_t stop_requested = 0;
 int server_fd = -1;
@@ -56,7 +57,6 @@ struct AppConfig
     uint16_t port{8080};
     std::string hand{"both"};
     std::filesystem::path assets;
-    std::filesystem::path poses_file;
     std::string session_token;
     std::shared_ptr<rh56::HandClient> hand_client;
 };
@@ -552,157 +552,37 @@ std::optional<rh56::Position> ParseValues(const std::string& text)
     return values;
 }
 
-struct SavedPose
+std::optional<JointDelays> ParseDelays(const std::string& text)
 {
-    std::string id;
-    int64_t created_ms{0};
-    std::string name;
-    rh56::Position right{};
-    rh56::Position left{};
-};
-
-std::string HexEncode(const std::string& value)
-{
-    static constexpr char digits[] = "0123456789ABCDEF";
-    std::string encoded;
-    encoded.reserve(value.size() * 2);
-    for (const unsigned char byte : value) {
-        encoded.push_back(digits[byte >> 4]);
-        encoded.push_back(digits[byte & 0x0F]);
-    }
-    return encoded;
-}
-
-std::optional<std::string> HexDecode(const std::string& value)
-{
-    if (value.size() % 2 != 0)
-        return std::nullopt;
-    std::string decoded;
-    decoded.reserve(value.size() / 2);
-    for (std::size_t i = 0; i < value.size(); i += 2) {
-        char* end = nullptr;
-        const std::string pair = value.substr(i, 2);
-        const long byte = std::strtol(pair.c_str(), &end, 16);
-        if (end != pair.c_str() + 2)
+    JointDelays delays{};
+    std::istringstream input(text);
+    std::string item;
+    std::size_t count = 0;
+    while (std::getline(input, item, ',')) {
+        if (count >= delays.size())
             return std::nullopt;
-        decoded.push_back(static_cast<char>(byte));
+        const auto delay = ParseInteger(item, 0, kMaximumPoseDelayMs);
+        if (!delay)
+            return std::nullopt;
+        delays[count++] = static_cast<uint32_t>(*delay);
     }
-    return decoded;
-}
-
-std::vector<std::string> SplitTabs(const std::string& line)
-{
-    std::vector<std::string> fields;
-    std::size_t start = 0;
-    while (start <= line.size()) {
-        const auto end = line.find('\t', start);
-        fields.push_back(line.substr(start, end - start));
-        if (end == std::string::npos)
-            break;
-        start = end + 1;
-    }
-    return fields;
-}
-
-std::vector<SavedPose> LoadPoses(const std::filesystem::path& path)
-{
-    std::vector<SavedPose> poses;
-    std::ifstream input(path);
-    std::string line;
-    while (std::getline(input, line)) {
-        const auto fields = SplitTabs(line);
-        if (fields.size() != 15)
-            continue;
-        try {
-            SavedPose pose;
-            pose.id = fields[0];
-            pose.created_ms = std::stoll(fields[1]);
-            const auto name = HexDecode(fields[2]);
-            if (!name || pose.id.empty())
-                continue;
-            pose.name = *name;
-            bool valid = true;
-            for (std::size_t i = 0; i < 6; ++i) {
-                const auto right = ParseQ(fields[3 + i]);
-                const auto left = ParseQ(fields[9 + i]);
-                if (!right || !left) {
-                    valid = false;
-                    break;
-                }
-                pose.right[i] = *right;
-                pose.left[i] = *left;
-            }
-            if (valid)
-                poses.push_back(std::move(pose));
-        } catch (...) {
-            continue;
-        }
-    }
-    return poses;
-}
-
-void StorePoses(const std::filesystem::path& path,
-                const std::vector<SavedPose>& poses)
-{
-    if (!path.parent_path().empty())
-        std::filesystem::create_directories(path.parent_path());
-    const auto temporary = path.string() + ".tmp-" + std::to_string(getpid());
-    {
-        std::ofstream output(temporary, std::ios::trunc);
-        if (!output)
-            throw std::runtime_error("Cannot write pose file " + path.string());
-        output << std::fixed << std::setprecision(3);
-        for (const auto& pose : poses) {
-            output << pose.id << '\t' << pose.created_ms << '\t'
-                   << HexEncode(pose.name);
-            for (const float value : pose.right)
-                output << '\t' << value;
-            for (const float value : pose.left)
-                output << '\t' << value;
-            output << '\n';
-        }
-        output.flush();
-        if (!output)
-            throw std::runtime_error("Failed to flush pose file " + path.string());
-    }
-    std::error_code error;
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::filesystem::remove(temporary);
-        throw std::runtime_error("Cannot replace pose file: " + error.message());
-    }
-}
-
-std::string SavedPoseJson(const SavedPose& pose)
-{
-    std::ostringstream json;
-    json << "{\"id\":\"" << JsonEscape(pose.id)
-         << "\",\"created\":" << pose.created_ms
-         << ",\"name\":\"" << JsonEscape(pose.name)
-         << "\",\"right\":" << PositionJson(pose.right)
-         << ",\"left\":" << PositionJson(pose.left) << '}';
-    return json.str();
+    return count == delays.size() ? std::optional<JointDelays>{delays}
+                                  : std::nullopt;
 }
 
 void ServePoseList(int fd, const AppConfig& config)
 {
-    try {
-        const auto poses = LoadPoses(config.poses_file);
-        std::ostringstream json;
-        json << "{\"ok\":true,\"poses\":[";
-        for (std::size_t i = 0; i < poses.size(); ++i) {
-            if (i)
-                json << ',';
-            json << SavedPoseJson(poses[i]);
-        }
-        json << "]}";
-        Respond(fd, 200, "OK", "application/json; charset=utf-8", json.str());
-    } catch (const std::exception& error) {
-        Respond(fd, 500, "Internal Server Error",
-                "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"" +
-                    JsonEscape(error.what()) + "\"}");
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->ListPoses(reply);
+    if (result != 0) {
+        Respond(fd, 503, "Service Unavailable", "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
     }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"poses\":" +
+                unitree::common::ToJsonString(reply.poses) + '}');
 }
 
 bool ValidPoseId(const std::string& id)
@@ -736,42 +616,33 @@ void ServePoseSave(int fd, const AppConfig& config,
         return;
     }
 
-    try {
-        auto poses = LoadPoses(config.poses_file);
-        const auto requested_id = fields.find("id");
-        if (requested_id != fields.end() && ValidPoseId(requested_id->second)) {
-            const auto existing = std::find_if(
-                poses.begin(), poses.end(), [&](const SavedPose& pose) {
-                    return pose.id == requested_id->second;
-                });
-            if (existing != poses.end()) {
-                Respond(fd, 200, "OK", "application/json; charset=utf-8",
-                        "{\"ok\":true,\"pose\":" + SavedPoseJson(*existing) + '}');
-                return;
-            }
-        }
-
-        SavedPose pose;
-        pose.id = requested_id != fields.end() && ValidPoseId(requested_id->second)
-                      ? requested_id->second
-                      : std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count()) +
-                            "-" + RandomToken().substr(0, 8);
-        pose.created_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::system_clock::now().time_since_epoch()).count();
-        pose.name = name->second;
-        pose.right = *right_values;
-        pose.left = *left_values;
-        poses.insert(poses.begin(), pose);
-        StorePoses(config.poses_file, poses);
-        Respond(fd, 200, "OK", "application/json; charset=utf-8",
-                "{\"ok\":true,\"pose\":" + SavedPoseJson(pose) + '}');
-    } catch (const std::exception& error) {
-        Respond(fd, 500, "Internal Server Error",
+    rh56::PoseRequest save;
+    save.action = "save";
+    const auto requested_id = fields.find("id");
+    if (requested_id != fields.end())
+        save.id = requested_id->second;
+    save.name = name->second;
+    save.right.assign(right_values->begin(), right_values->end());
+    save.left.assign(left_values->begin(), left_values->end());
+    save.delays_ms.assign(rh56::kJointCount, 0);
+    save.request_id = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->Poses(save, reply);
+    if (result != 0) {
+        Respond(fd, result == static_cast<int32_t>(rh56::ResultCode::kInvalidArgument)
+                        ? 400 : 503,
+                result == static_cast<int32_t>(rh56::ResultCode::kInvalidArgument)
+                    ? "Bad Request" : "Service Unavailable",
                 "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"" +
-                    JsonEscape(error.what()) + "\"}");
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
     }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"pose\":" +
+                unitree::common::ToJsonString(reply.pose) + '}');
 }
 
 void ServePoseDelete(int fd, const AppConfig& config,
@@ -786,22 +657,26 @@ void ServePoseDelete(int fd, const AppConfig& config,
                 "{\"ok\":false,\"error\":\"Invalid pose id\"}");
         return;
     }
-    try {
-        auto poses = LoadPoses(config.poses_file);
-        poses.erase(std::remove_if(poses.begin(), poses.end(),
-                                   [&](const SavedPose& pose) {
-                                       return pose.id == id->second;
-                                   }),
-                    poses.end());
-        StorePoses(config.poses_file, poses);
-        Respond(fd, 200, "OK", "application/json; charset=utf-8",
-                "{\"ok\":true}");
-    } catch (const std::exception& error) {
-        Respond(fd, 500, "Internal Server Error",
+    rh56::PoseRequest remove;
+    remove.action = "delete";
+    remove.id = id->second;
+    remove.request_id = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->Poses(remove, reply);
+    if (result != 0) {
+        const bool missing = result == static_cast<int32_t>(
+            rh56::ResultCode::kPoseNotFound);
+        Respond(fd, missing ? 404 : 503,
+                missing ? "Not Found" : "Service Unavailable",
                 "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"" +
-                    JsonEscape(error.what()) + "\"}");
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
     }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true}");
 }
 
 void ServePoseRename(int fd, const AppConfig& config,
@@ -818,27 +693,128 @@ void ServePoseRename(int fd, const AppConfig& config,
                 "{\"ok\":false,\"error\":\"Invalid pose name\"}");
         return;
     }
-    try {
-        auto poses = LoadPoses(config.poses_file);
-        const auto pose = std::find_if(poses.begin(), poses.end(),
-                                       [&](const SavedPose& item) {
-                                           return item.id == id->second;
-                                       });
-        if (pose == poses.end()) {
-            Respond(fd, 404, "Not Found", "application/json; charset=utf-8",
-                    "{\"ok\":false,\"error\":\"Pose not found\"}");
-            return;
-        }
-        pose->name = name->second;
-        StorePoses(config.poses_file, poses);
-        Respond(fd, 200, "OK", "application/json; charset=utf-8",
-                "{\"ok\":true,\"pose\":" + SavedPoseJson(*pose) + '}');
-    } catch (const std::exception& error) {
-        Respond(fd, 500, "Internal Server Error",
+    rh56::PoseRequest rename;
+    rename.action = "rename";
+    rename.id = id->second;
+    rename.name = name->second;
+    rename.request_id = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->Poses(rename, reply);
+    if (result != 0) {
+        const bool missing = result == static_cast<int32_t>(
+            rh56::ResultCode::kPoseNotFound);
+        Respond(fd, missing ? 404 : 503,
+                missing ? "Not Found" : "Service Unavailable",
                 "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"" +
-                    JsonEscape(error.what()) + "\"}");
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
     }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"pose\":" +
+                unitree::common::ToJsonString(reply.pose) + '}');
+}
+
+void ServePoseDelays(int fd, const AppConfig& config,
+                     const HttpRequest& request)
+{
+    const auto fields = ParseForm(request.body);
+    const auto token = fields.find("token");
+    const auto id = fields.find("id");
+    const auto delays = fields.find("delays_ms");
+    if (token == fields.end() || token->second != config.session_token ||
+        id == fields.end() || !ValidPoseId(id->second) ||
+        delays == fields.end()) {
+        Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"Invalid pose delay request\"}");
+        return;
+    }
+    const auto values = ParseDelays(delays->second);
+    if (!values) {
+        Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"Expected six delays in 0..3000 ms\"}");
+        return;
+    }
+
+    rh56::PoseRequest update;
+    update.action = "set_delays";
+    update.id = id->second;
+    update.delays_ms.assign(values->begin(), values->end());
+    update.request_id = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->Poses(update, reply);
+    if (result != 0) {
+        const bool missing = result == static_cast<int32_t>(
+            rh56::ResultCode::kPoseNotFound);
+        Respond(fd, missing ? 404 : 503,
+                missing ? "Not Found" : "Service Unavailable",
+                "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
+    }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"pose\":" +
+                unitree::common::ToJsonString(reply.pose) + '}');
+}
+
+void ServePoseExecute(int fd, const AppConfig& config,
+                      const HttpRequest& request)
+{
+    const auto fields = ParseForm(request.body);
+    const auto token = fields.find("token");
+    const auto id = fields.find("id");
+    const auto confirm = fields.find("confirm");
+    if (token == fields.end() || token->second != config.session_token ||
+        id == fields.end() || !ValidPoseId(id->second) ||
+        confirm == fields.end() || confirm->second != "execute-pose") {
+        Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"Invalid pose execution request\"}");
+        return;
+    }
+
+    const uint64_t request_id =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    rh56::PoseReply reply;
+    const int32_t result = config.hand_client->ExecutePose(
+        id->second, config.hand, request_id, reply);
+    if (result != 0) {
+        const bool missing = result == static_cast<int32_t>(
+            rh56::ResultCode::kPoseNotFound);
+        const bool conflict = result == static_cast<int32_t>(
+            rh56::ResultCode::kBusy);
+        Respond(fd, missing ? 404 : (conflict ? 409 : 503),
+                missing ? "Not Found" :
+                          (conflict ? "Conflict" : "Service Unavailable"),
+                "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"" + JsonEscape(reply.message) +
+                    "\"}");
+        return;
+    }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"id\":\"" + JsonEscape(reply.pose.id) +
+                "\",\"duration_ms\":" +
+                std::to_string(reply.duration_ms) + '}');
+}
+
+int32_t SendTargets(const AppConfig& config, const std::string& hand,
+                    const rh56::Position& position, uint8_t joint_mask,
+                    rh56::OperationReply& reply)
+{
+    rh56::SetTargetsRequest command;
+    command.hand = hand;
+    command.joint_mask = joint_mask;
+    command.q.assign(position.begin(), position.end());
+    command.command_id = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    command.timeout_ms = 5000;
+    return config.hand_client->SetTargets(command, reply);
 }
 
 void ServeCommand(int fd, const AppConfig& config, const HttpRequest& request)
@@ -893,16 +869,9 @@ void ServeCommand(int fd, const AppConfig& config, const HttpRequest& request)
     }
 
     try {
-        rh56::SetTargetsRequest command;
-        command.hand = hand_it->second;
-        command.joint_mask = rh56::EncodeMask(mask);
-        command.q.assign(position.begin(), position.end());
-        command.command_id = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-        command.timeout_ms = 5000;
         rh56::OperationReply reply;
-        const int32_t result = config.hand_client->SetTargets(command, reply);
+        const int32_t result = SendTargets(
+            config, hand_it->second, position, rh56::EncodeMask(mask), reply);
         if (result != 0) {
             const bool busy = result == static_cast<int32_t>(
                 rh56::ResultCode::kBusy);
@@ -951,6 +920,14 @@ void HandleClient(int fd, const AppConfig& config)
     }
     if (request->method == "POST" && request->path == "/api/poses/rename") {
         ServePoseRename(fd, config, *request);
+        return;
+    }
+    if (request->method == "POST" && request->path == "/api/poses/delays") {
+        ServePoseDelays(fd, config, *request);
+        return;
+    }
+    if (request->method == "POST" && request->path == "/api/poses/execute") {
+        ServePoseExecute(fd, config, *request);
         return;
     }
     if (request->method == "GET" &&
@@ -1003,7 +980,7 @@ void PrintUsage(const char* executable)
     std::cerr << "Usage: " << executable
               << " [--hand left|right|both]"
                  " [--bind ADDRESS] [--port PORT] [--assets PATH]"
-                 " [--poses-file PATH] [--network INTERFACE]\n";
+                 " [--network INTERFACE]\n";
 }
 
 std::optional<AppConfig> ParseArguments(int argc, char** argv)
@@ -1011,13 +988,12 @@ std::optional<AppConfig> ParseArguments(int argc, char** argv)
     AppConfig config;
     const auto project_root = ProjectRoot(argv[0]);
     config.assets = project_root / "web" / "hand_control";
-    config.poses_file = project_root / "data" / "hand_poses.tsv";
     config.session_token = RandomToken();
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if ((argument == "--hand" || argument == "--bind" ||
              argument == "--port" || argument == "--assets" ||
-             argument == "--poses-file" || argument == "--network") &&
+             argument == "--network") &&
             i + 1 < argc) {
             const std::string value = argv[++i];
             if (argument == "--hand")
@@ -1026,8 +1002,6 @@ std::optional<AppConfig> ParseArguments(int argc, char** argv)
                 config.bind_address = value;
             else if (argument == "--assets")
                 config.assets = value;
-            else if (argument == "--poses-file")
-                config.poses_file = value;
             else if (argument == "--network")
                 config.network = value;
             else {
@@ -1109,7 +1083,7 @@ int main(int argc, char** argv)
     try {
         unitree::robot::ChannelFactory::Instance()->Init(0, config->network);
         config->hand_client = std::make_shared<rh56::HandClient>();
-        config->hand_client->SetTimeout(2.0f);
+        config->hand_client->SetTimeout(8.0f);
         config->hand_client->Init();
         for (const std::string hand : {"right", "left"}) {
             if (!HandEnabled(*config, hand))

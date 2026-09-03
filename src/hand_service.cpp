@@ -1,5 +1,6 @@
 #include "rh56/hand_api.hpp"
 #include "rh56/hand_controller.hpp"
+#include "rh56/pose_store.hpp"
 
 #include <unitree/idl/go2/MotorCmds_.hpp>
 #include <unitree/idl/go2/MotorStates_.hpp>
@@ -18,10 +19,12 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 #include <unistd.h>
 
 namespace {
@@ -38,6 +41,7 @@ std::atomic_bool running{true};
 struct Config {
     std::string hand{"both"};
     std::string network;
+    std::filesystem::path poses_file;
     bool execute{false};
 };
 
@@ -82,28 +86,32 @@ private:
 Config ParseArgs(int argc, char** argv)
 {
     Config config;
+    config.poses_file = ProjectRoot(argv[0]) / "data" / "hand_poses.json";
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "--execute") {
             config.execute = true;
-        } else if ((argument == "--hand" || argument == "--network") &&
+        } else if ((argument == "--hand" || argument == "--network" ||
+                    argument == "--poses-file") &&
                    i + 1 < argc) {
             const std::string value = argv[++i];
             if (argument == "--hand")
                 config.hand = value;
+            else if (argument == "--poses-file")
+                config.poses_file = value;
             else
                 config.network = value;
         } else {
             throw std::invalid_argument(
                 "Usage: hand_service --execute [--hand left|right|both] "
-                "[--network INTERFACE]");
+                "[--network INTERFACE] [--poses-file PATH]");
         }
     }
     if (!config.execute || (config.hand != "left" && config.hand != "right" &&
                             config.hand != "both"))
         throw std::invalid_argument(
             "Usage: hand_service --execute [--hand left|right|both] "
-            "[--network INTERFACE]");
+            "[--network INTERFACE] [--poses-file PATH]");
     return config;
 }
 
@@ -119,7 +127,7 @@ std::vector<int32_t> Integers(const T& values)
 class HandRuntime
 {
 public:
-    explicit HandRuntime(const Config& config)
+    explicit HandRuntime(const Config& config) : poses_(config.poses_file)
     {
         if (config.hand == "right" || config.hand == "both")
             right_ = MakeController(kRightDevice);
@@ -138,6 +146,10 @@ public:
     {
         rh56::OperationReply reply;
         reply.request_id = request.command_id;
+        std::unique_lock<std::mutex> operation(control_mutex_, std::try_to_lock);
+        if (!operation)
+            return Fail(reply, rh56::ResultCode::kBusy,
+                        "another RPC control operation is active");
         auto* controller = ControllerFor(request.hand);
         if (!controller)
             return Fail(reply, rh56::ResultCode::kHandUnavailable,
@@ -166,6 +178,10 @@ public:
     {
         rh56::OperationReply reply;
         reply.request_id = request.request_id;
+        std::unique_lock<std::mutex> operation(control_mutex_, std::try_to_lock);
+        if (!operation)
+            return Fail(reply, rh56::ResultCode::kBusy,
+                        "another RPC control operation is active");
         auto* controller = ControllerFor(request.hand);
         if (!controller)
             return Fail(reply, rh56::ResultCode::kHandUnavailable,
@@ -185,6 +201,10 @@ public:
     {
         rh56::OperationReply reply;
         reply.request_id = request.command_id;
+        std::unique_lock<std::mutex> operation(control_mutex_, std::try_to_lock);
+        if (!operation)
+            return Fail(reply, rh56::ResultCode::kBusy,
+                        "another RPC control operation is active");
         auto* controller = ControllerFor(request.hand);
         if (!controller)
             return Fail(reply, rh56::ResultCode::kHandUnavailable,
@@ -249,9 +269,140 @@ public:
         if (!controller)
             return Fail(reply, rh56::ResultCode::kHandUnavailable,
                         "requested hand is not enabled");
+        pose_cancel_requested_ = true;
+        std::lock_guard<std::mutex> operation(control_mutex_);
         BeginMaintenance(request.hand);
         const auto result = controller->HoldCurrent();
         Fill(reply, result, controller->GetState());
+        return reply;
+    }
+
+    rh56::PoseReply Poses(const rh56::PoseRequest& request)
+    {
+        rh56::PoseReply reply;
+        reply.request_id = request.request_id;
+        try {
+            if (request.action == "list") {
+                reply.poses = poses_.List();
+            } else if (request.action == "save") {
+                reply.pose = poses_.Save(request);
+            } else if (request.action == "rename") {
+                const auto pose = poses_.Rename(request.id, request.name);
+                if (!pose)
+                    return Fail(reply, rh56::ResultCode::kPoseNotFound,
+                                "pose not found");
+                reply.pose = *pose;
+            } else if (request.action == "set_delays") {
+                const auto pose = poses_.SetDelays(request.id, request.delays_ms);
+                if (!pose)
+                    return Fail(reply, rh56::ResultCode::kPoseNotFound,
+                                "pose not found");
+                reply.pose = *pose;
+            } else if (request.action == "delete") {
+                if (!poses_.Delete(request.id))
+                    return Fail(reply, rh56::ResultCode::kPoseNotFound,
+                                "pose not found");
+            } else if (request.action == "execute") {
+                return ExecutePose(request);
+            } else {
+                return Fail(reply, rh56::ResultCode::kInvalidArgument,
+                            "unknown pose action");
+            }
+            reply.message = "ok";
+            return reply;
+        } catch (const std::invalid_argument& error) {
+            return Fail(reply, rh56::ResultCode::kInvalidArgument, error.what());
+        } catch (const std::exception& error) {
+            return Fail(reply, rh56::ResultCode::kStorageError, error.what());
+        }
+    }
+
+    rh56::PoseReply ExecutePose(const rh56::PoseRequest& request)
+    {
+        rh56::PoseReply reply;
+        reply.request_id = request.request_id;
+        if (request.hand != "left" && request.hand != "right" &&
+            request.hand != "both")
+            return Fail(reply, rh56::ResultCode::kInvalidArgument,
+                        "hand must be left, right or both");
+        if (request.timeout_ms < 50 || request.timeout_ms > 5000)
+            return Fail(reply, rh56::ResultCode::kInvalidArgument,
+                        "timeout_ms must be in 50..5000");
+
+        const auto pose = poses_.Find(request.id);
+        if (!pose)
+            return Fail(reply, rh56::ResultCode::kPoseNotFound,
+                        "pose not found");
+        reply.pose = *pose;
+
+        std::vector<std::string> hands;
+        if (request.hand != "left" && right_)
+            hands.emplace_back("right");
+        if (request.hand != "right" && left_)
+            hands.emplace_back("left");
+        if (hands.empty())
+            return Fail(reply, rh56::ResultCode::kHandUnavailable,
+                        "requested hand is not enabled");
+
+        std::unique_lock<std::mutex> operation(control_mutex_, std::try_to_lock);
+        if (!operation)
+            return Fail(reply, rh56::ResultCode::kBusy,
+                        "another RPC control operation is active");
+        pose_cancel_requested_ = false;
+
+        const uint32_t maximum_delay = *std::max_element(
+            pose->delays_ms.begin(), pose->delays_ms.end());
+        if (!TryArmRpcWatchdogs(hands, maximum_delay + request.timeout_ms + 500))
+            return Fail(reply, rh56::ResultCode::kBusy,
+                        "DDS position stream currently owns a requested hand");
+
+        std::vector<std::string> controlled;
+        auto stop = [&](rh56::ResultCode code, const std::string& message) {
+            for (const auto& hand : controlled)
+                ControllerFor(hand)->HoldCurrent();
+            CancelRpcWatchdogs(hands);
+            return Fail(reply, code, message);
+        };
+
+        for (const auto& hand : hands) {
+            auto* controller = ControllerFor(hand);
+            const auto refresh = controller->RefreshPosition();
+            if (!refresh)
+                return stop(refresh.code, hand + ": " + refresh.message);
+            const auto current = controller->GetState().feedback_q;
+            const auto hold = controller->SetTargets(
+                current, rh56::kAllJointsMask, request.request_id);
+            if (!hold)
+                return stop(hold.code, hand + ": " + hold.message);
+            controlled.push_back(hand);
+        }
+
+        std::map<uint32_t, uint8_t> groups;
+        for (std::size_t joint = 0; joint < rh56::kJointCount; ++joint)
+            groups[pose->delays_ms[joint]] |= uint8_t{1} << joint;
+
+        const auto started = std::chrono::steady_clock::now();
+        for (const auto& [delay_ms, mask] : groups) {
+            if (!WaitForPoseDelay(started +
+                                  std::chrono::milliseconds(delay_ms)))
+                return stop(rh56::ResultCode::kStaleCommand,
+                            running ? "pose execution was cancelled"
+                                    : "service is stopping");
+            for (const auto& hand : hands) {
+                rh56::Position target{};
+                const auto& values = hand == "right" ? pose->right : pose->left;
+                std::copy(values.begin(), values.end(), target.begin());
+                const auto result = ControllerFor(hand)->SetTargets(
+                    target, mask, request.request_id);
+                if (!result)
+                    return stop(result.code, hand + ": " + result.message);
+            }
+        }
+
+        ArmRpcWatchdogs(hands, request.timeout_ms);
+        reply.message = "ok";
+        reply.duration_ms = maximum_delay;
+        reply.affected_hands = hands;
         return reply;
     }
 
@@ -340,6 +491,59 @@ private:
                                          std::chrono::milliseconds(timeout_ms);
         rpc_watchdogs_[index].active = true;
         return true;
+    }
+
+    bool TryArmRpcWatchdogs(const std::vector<std::string>& hands,
+                            uint32_t timeout_ms)
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - dds_.received_at).count();
+        for (const auto& hand : hands) {
+            const std::size_t index = hand == "right" ? 0 : 1;
+            if (dds_.received && age <= kDefaultCommandTimeoutMs &&
+                !dds_.timed_out[index])
+                return false;
+        }
+        for (const auto& hand : hands) {
+            auto& watchdog = rpc_watchdogs_[hand == "right" ? 0 : 1];
+            watchdog.deadline = now + std::chrono::milliseconds(timeout_ms);
+            watchdog.active = true;
+        }
+        return true;
+    }
+
+    void ArmRpcWatchdogs(const std::vector<std::string>& hands,
+                         uint32_t timeout_ms)
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout_ms);
+        for (const auto& hand : hands) {
+            auto& watchdog = rpc_watchdogs_[hand == "right" ? 0 : 1];
+            watchdog.deadline = deadline;
+            watchdog.active = true;
+        }
+    }
+
+    void CancelRpcWatchdogs(const std::vector<std::string>& hands)
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        for (const auto& hand : hands)
+            rpc_watchdogs_[hand == "right" ? 0 : 1].active = false;
+    }
+
+    bool WaitForPoseDelay(std::chrono::steady_clock::time_point deadline) const
+    {
+        while (running && !pose_cancel_requested_) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return true;
+            std::this_thread::sleep_until(
+                std::min(deadline, now + std::chrono::milliseconds(20)));
+        }
+        return false;
     }
 
     bool RpcActive(std::size_t index) const
@@ -480,9 +684,9 @@ private:
         reply.temperature = Integers(state.temperature);
     }
 
-    static rh56::OperationReply Fail(rh56::OperationReply reply,
-                                     rh56::ResultCode code,
-                                     const std::string& message)
+    template <typename Reply>
+    static Reply Fail(Reply reply, rh56::ResultCode code,
+                      const std::string& message)
     {
         reply.code = static_cast<int32_t>(code);
         reply.message = message;
@@ -497,8 +701,11 @@ private:
 
     std::unique_ptr<rh56::HandController> right_;
     std::unique_ptr<rh56::HandController> left_;
+    rh56::PoseStore poses_;
     std::shared_ptr<CommandSubscriber> command_subscriber_;
     std::shared_ptr<StatePublisher> state_publisher_;
+    std::mutex control_mutex_;
+    std::atomic_bool pose_cancel_requested_{false};
     mutable std::mutex command_mutex_;
     DdsCommand dds_{};
     std::array<RpcWatchdog, 2> rpc_watchdogs_{};
@@ -524,6 +731,8 @@ public:
             rh56::kApiApplyGrip, &HandRpcServer::HandleApplyGrip);
         UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(
             rh56::kApiHold, &HandRpcServer::HandleHold);
+        UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(
+            rh56::kApiPoses, &HandRpcServer::HandlePoses);
     }
 
 private:
@@ -562,6 +771,13 @@ private:
         return Handle<rh56::HoldRequest>(
             parameter, data,
             [this](const auto& request) { return runtime_.Hold(request); });
+    }
+
+    int32_t HandlePoses(const std::string& parameter, std::string& data)
+    {
+        return Handle<rh56::PoseRequest>(
+            parameter, data,
+            [this](const auto& request) { return runtime_.Poses(request); });
     }
 
     template <typename Request, typename Handler>

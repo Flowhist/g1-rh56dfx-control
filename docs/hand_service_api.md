@@ -5,7 +5,7 @@
 `hand_service` 是左右 RH56 串口的唯一硬件访问进程，对外提供：
 
 - 兼容宇树 Inspire 接口的 DDS 位置命令和状态 Topic；
-- 支持单指掩码控制、故障清除和完整状态查询的 Unitree RPC；
+- 支持单指控制、故障清除、状态查询和注册动作管理/执行的 Unitree RPC；
 - 头文件形式的 C++ 客户端 `src/rh56/hand_client.hpp`。
 
 位置统一使用归一化值：`0` 表示闭合，`1` 表示张开。单手关节顺序与
@@ -41,6 +41,7 @@ cmake --build build --target hand_service hand_clear_fault -j2
 | `--execute` | 必填，明确允许访问硬件 |
 | `--hand left\|right\|both` | 启用的手，默认 `both` |
 | `--network INTERFACE` | DDS 网卡；不填写时使用 SDK 默认值 |
+| `--poses-file PATH` | 注册动作文件；默认 `data/hand_poses.json` |
 
 服务会写入 `run/hand_service.pid`，并独占所选手的串口。如果本工程的其他
 控制进程已经占用串口，服务将拒绝启动。
@@ -89,7 +90,7 @@ publisher->Write(command);
 ## 4. RPC 接口
 
 - 服务名：`rh56_hand`
-- API 版本：`1.1.0.0`
+- API 版本：`1.2.0.0`
 
 | API ID | 操作 |
 |---:|---|
@@ -98,6 +99,7 @@ publisher->Write(command);
 | 1003 | 查询单手完整状态 |
 | 1004 | 设置抓握参数并发送目标 |
 | 1005 | 保持当前位置 |
+| 1006 | 注册动作管理与执行 |
 
 Unitree SDK 使用 JSON 字符串承载 RPC 的请求和响应。C++ 上层应直接使用
 `rh56::HandClient`，不要自行发布 SDK 内部的 RPC Topic。
@@ -290,9 +292,11 @@ int32_t result = hand.ClearFault(request, reply);
 | 100 | INVALID_ARGUMENT | 手、掩码、位置或超时参数非法 |
 | 101 | HAND_UNAVAILABLE | 服务启动时未启用该手 |
 | 102 | BUSY | 其他命令源正在控制该手 |
+| 103 | POSE_NOT_FOUND | 注册动作 ID 不存在 |
 | 200 | SERIAL_TIMEOUT | 未收到必要的串口遥测 |
 | 201 | WRITE_REJECTED | 固件未确认写命令 |
 | 202 | INVALID_RESPONSE | 客户端无法解析 RPC 响应 |
+| 203 | STORAGE_ERROR | 注册动作文件读写失败 |
 | 300 | JOINT_FAULTED | 所选关节存在故障，拒绝运动 |
 | 301 | OVER_TEMPERATURE | 过温故障必须冷却后自动恢复 |
 | 302 | FAULT_REMAINS | 清除后错误或故障停止状态仍存在 |
@@ -325,7 +329,93 @@ Unitree SDK 自身的传输错误码由 `HandClient` 原样返回。
 ./build/src/hand_hold_position both --network eth0
 ```
 
-## 9. 调用方建议
+## 9. 注册动作接口
+
+注册动作由常驻的 `hand_service` 管理，默认保存在 `data/hand_poses.json`。Web 只是可选
+调试客户端，它的保存、改名、延时、删除和执行按钮都调用以下 RPC。关闭 Web 后，
+上层仍可完整使用动作接口。
+
+API 1006 统一使用 `PoseRequest`，通过 `action` 区分操作：
+
+| `action` | 必需字段 | 作用 |
+|---|---|---|
+| `list` | 无 | 查询全部动作 |
+| `save` | `name`、`right`、`left` | 保存动作，`delays_ms` 省略时为全零 |
+| `rename` | `id`、`name` | 改名 |
+| `set_delays` | `id`、`delays_ms` | 修改六个关节启动延时 |
+| `delete` | `id` | 删除动作 |
+| `execute` | `id`、`hand` | 执行动作 |
+
+动作结构：
+
+```json
+{
+  "id": "1788336000000-1",
+  "created": 1788336000000,
+  "name": "拇指延后抓取",
+  "right": [0.2, 0.2, 0.2, 0.3, 0.4, 0.5],
+  "left": [0.2, 0.2, 0.2, 0.3, 0.4, 0.5],
+  "delays_ms": [0, 0, 0, 0, 300, 300]
+}
+```
+
+`delays_ms` 按小指、无名指、中指、食指、拇指弯曲、拇指旋转排列，单位为毫秒；
+左右手同名关节共用延时，允许范围为 `0..3000`。
+
+所有操作返回 `PoseReply`：查询结果在 `poses`，单条修改或执行结果在 `pose`。保存时
+`id` 留空由服务生成，传入已存在 ID 会直接返回原动作，便于调用方安全重试。修改立即
+持久化；不存在的 ID 返回 `103 POSE_NOT_FOUND`。
+
+### 9.1 执行语义
+
+```json
+{
+  "action": "execute",
+  "id": "1788336000000-1",
+  "hand": "both",
+  "request_id": 104,
+  "timeout_ms": 5000
+}
+```
+
+- `hand` 可为 `right`、`left` 或 `both`；`both` 表示服务启动时已启用的所有手；
+- 服务先读取并保持当前状态，再按 `delays_ms` 将相同延时的关节合并为一个掩码发送；
+- 活跃 DDS 位置流或另一个 RPC 控制操作存在时返回 `102 BUSY`；
+- `timeout_ms` 从最后一组关节命令发出后开始计算，到期后保持当时位置；
+- 响应在最后一组延时命令发出后返回，不代表机械运动已经到达目标；
+- 任一步骤失败时，已经进入本次动作控制的手会保持当前位置；
+- `Hold` RPC 可以中断正在等待启动延时的动作。
+
+成功响应的 `duration_ms` 是最后一个关节的启动延时，`affected_hands` 是实际执行的手。
+
+### 9.2 上层直接调用示例
+
+生产环境只需要启动 `hand_service`。上层不启动 `hand_web_control`，也不使用 Web token：
+
+```cpp
+#include "rh56/hand_client.hpp"
+#include <unitree/robot/channel/channel_factory.hpp>
+
+unitree::robot::ChannelFactory::Instance()->Init(0, "eth0");
+
+rh56::HandClient hand;
+hand.SetTimeout(8.0f);  // 覆盖最长 3 s 启动延时和 RPC 开销
+hand.Init();
+
+rh56::PoseReply list;
+if (hand.ListPoses(list) != 0)
+    throw std::runtime_error(list.message);
+
+rh56::PoseReply reply;
+const std::string id = list.poses.at(0).id;  // 实际程序应保存稳定 ID
+if (hand.ExecutePose(id, "both", 104, reply) != 0)
+    throw std::runtime_error(reply.message);
+```
+
+Web 的 `/api/poses/*` HTTP 路径继续保留用于调试，但它们只是上述 RPC 的转发层，
+不应作为生产上层的依赖。
+
+## 10. 调用方建议
 
 - DDS 连续控制建议以 20 至 50 Hz 发布；
 - RPC 连续控制的发送周期应小于 `timeout_ms` 的一半；

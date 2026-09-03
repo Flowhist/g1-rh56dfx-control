@@ -33,6 +33,9 @@ cmake --build build --target hand_service hand_compliant_teach hand_hold_positio
 ./build/src/hand_service --execute --hand both --network eth0
 ```
 
+该服务同时加载并管理 `data/hand_poses.json` 中的注册动作。生产环境只启动这个服务即可；
+需要指定其他动作文件时，把 `--poses-file PATH` 加在 `hand_service` 命令后。
+
 终端 2：启动网页控制服务。网页进程通过统一 RPC 接口访问 `hand_service`。
 
 ```bash
@@ -70,6 +73,38 @@ ip -br addr
 `hand_service` 和所有控制客户端应使用相同的 `--network`。如果 Unitree SDK 的默认网卡
 已经正确，可以省略该参数；多网卡设备建议明确指定，避免 DDS 连接到错误网络。
 
+## 头部相机单帧抓拍
+
+运行快捷脚本即可从 `videohub` 获取一张头部相机 JPEG，默认保存到 `captures/`：
+
+```bash
+./scripts/capture_head_camera.sh
+```
+
+也可以指定保存位置和 DDS 网卡：
+
+```bash
+./scripts/capture_head_camera.sh --output captures/test.jpg --network eth0
+```
+
+脚本会在首次运行或源码更新后自动构建 `head_camera_capture`。成功时输出所保存文件的绝对路径。
+
+## 右手腕相机录像
+
+运行以下脚本即可从右腕 D405 彩色相机录制 10 秒 H.264 MP4，默认保存到 `captures/`：
+
+```bash
+./scripts/record_right_wrist_camera.sh
+```
+
+使用 `--duration` 指定秒数，使用 `--output` 指定保存位置；时长设为 `0` 时持续录制，按
+`Ctrl+C` 保存并退出：
+
+```bash
+./scripts/record_right_wrist_camera.sh --duration 30 --output captures/right_wrist.mp4
+./scripts/record_right_wrist_camera.sh --duration 0
+```
+
 ## 统一上层接口
 
 `hand_service` 是唯一的硬件所有者，对外提供：
@@ -77,7 +112,8 @@ ip -br addr
 - Unitree 兼容的 DDS 位置指令与状态主题；
 - 支持关节掩码的位置控制 RPC；
 - 完整状态读取 RPC；
-- 夹持、当前位置保持和故障清除 RPC。
+- 夹持、当前位置保持和故障清除 RPC；
+- 注册动作的查询、保存、修改、删除和带关节延时执行 RPC。
 
 接口主题、RPC 数据结构、结果码和 C++ 客户端示例见
 [`docs/hand_service_api.md`](docs/hand_service_api.md)。服务运行时不要再启动其他直接访问手部串口的程序。
@@ -85,8 +121,15 @@ ip -br addr
 ## 网页控制
 
 网页提供双手各 6 个关节的独立控制、预设动作、姿态库、实时执行器反馈和姿态示意图。
-自定义姿态在保存、重命名或删除后会自动写入 `data/hand_poses.tsv`，并在下次启动时恢复。
-使用 `--poses-file PATH` 可以指定其他姿态文件。
+网页仅是 `hand_service` 的可选调试客户端。自定义姿态的保存、重命名、延时设置、删除和
+执行全部调用统一 RPC；网页本身不再持有动作数据，关闭网页服务不会影响上层执行动作。
+
+每个姿态可以设置 6 个关节类型的启动延时，左右手同名关节共用该设置，范围为
+`0–3000 ms`。旧姿态默认全部为 `0 ms`。姿态卡片提供“全部同步”和“拇指 +300 ms”
+快捷设置，也可分别精调；点击“执行”后，Web 只向服务提交动作 ID，延时编排由
+`hand_service` 完成。上层直接使用
+`HandClient::ListPoses()` 查询 ID，再使用 `HandClient::ExecutePose()` 执行；无需启动
+`hand_web_control`，也不需要 Web token。完整示例见接口文档第 5 节。
 
 每只手都有默认折叠的寄存器监视器。展开后会持续读取位置 (`0x060A`)、力 (`0x062E`)、
 电流 (`0x063A`)、错误 (`0x0646`)、状态 (`0x064C`) 和温度 (`0x0652`)；关闭面板后停止额外轮询。

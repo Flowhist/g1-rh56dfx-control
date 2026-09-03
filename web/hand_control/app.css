@@ -210,7 +210,7 @@ h1 {
 
 .pose-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
   gap: 10px;
 }
 
@@ -269,6 +269,106 @@ h1 {
 .pose-action.replay { border-color: rgba(255, 107, 53, 0.55); color: #ff9a74; }
 .pose-action.delete { padding-inline: 8px; color: #8d999f; }
 .pose-action:hover { border-color: #77858d; }
+
+.pose-delay-panel {
+  grid-column: 1 / -1;
+  padding-top: 9px;
+  border-top: 1px solid #273138;
+}
+
+.pose-delay-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  color: #bfc9ce;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.pose-delay-panel summary small {
+  overflow: hidden;
+  color: #7f8e96;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delay-presets {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.delay-presets button,
+.delay-footer button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid #354149;
+  border-radius: 6px;
+  background: #1a2227;
+  color: #dbe1e4;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.delay-presets button:hover,
+.delay-footer button:hover { border-color: var(--accent); }
+
+.pose-delay-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pose-delay-grid > label {
+  display: grid;
+  gap: 4px;
+  color: #87959d;
+  font-size: 10px;
+}
+
+.delay-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #303b42;
+  border-radius: 6px;
+  background: #0d1317;
+}
+
+.delay-input:focus-within { border-color: var(--accent); }
+
+.delay-input input {
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  padding: 0 4px 0 8px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.delay-input small { color: #68767e; font-size: 9px; }
+
+.delay-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  color: #69777f;
+  font-size: 10px;
+}
+
+.delay-footer button {
+  border-color: rgba(255, 107, 53, 0.55);
+  color: #ff9a74;
+}
 
 .hands-grid {
   display: grid;
@@ -621,6 +721,9 @@ footer {
   .pose-save-controls { display: grid; }
   .pose-name { width: 100%; }
   .save-pose { width: 100%; }
+  .pose-delay-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pose-delay-panel summary { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .pose-delay-panel summary small { max-width: 100%; text-align: left; }
   .joint-control { grid-template-columns: 68px minmax(70px, 1fr) 46px; gap: 7px; }
   .hand-actions { padding-inline: 14px; }
   .action-button.primary { margin-left: 0; }

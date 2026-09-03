@@ -8,12 +8,13 @@
 namespace rh56 {
 
 inline const std::string kServiceName = "rh56_hand";
-inline const std::string kApiVersion = "1.1.0.0";
+inline const std::string kApiVersion = "1.2.0.0";
 constexpr int32_t kApiSetTargets = 1001;
 constexpr int32_t kApiClearFault = 1002;
 constexpr int32_t kApiGetState = 1003;
 constexpr int32_t kApiApplyGrip = 1004;
 constexpr int32_t kApiHold = 1005;
+constexpr int32_t kApiPoses = 1006;
 
 class SetTargetsRequest : public unitree::common::Jsonize
 {
@@ -134,6 +135,77 @@ public:
     }
 };
 
+class Pose : public unitree::common::Jsonize
+{
+public:
+    std::string id;
+    int64_t created{0};
+    std::string name;
+    std::vector<float> right;
+    std::vector<float> left;
+    std::vector<uint32_t> delays_ms;
+
+    void fromJson(unitree::common::JsonMap& json) override
+    {
+        JN_FROM(json, "id", id);
+        JN_FROM(json, "created", created);
+        JN_FROM(json, "name", name);
+        JN_FROM(json, "right", right);
+        JN_FROM(json, "left", left);
+        JN_FROM(json, "delays_ms", delays_ms);
+    }
+
+    void toJson(unitree::common::JsonMap& json) const override
+    {
+        JN_TO(json, "id", id);
+        JN_TO(json, "created", created);
+        JN_TO(json, "name", name);
+        JN_TO(json, "right", right);
+        JN_TO(json, "left", left);
+        JN_TO(json, "delays_ms", delays_ms);
+    }
+};
+
+class PoseRequest : public unitree::common::Jsonize
+{
+public:
+    std::string action;
+    std::string id;
+    std::string name;
+    std::vector<float> right;
+    std::vector<float> left;
+    std::vector<uint32_t> delays_ms;
+    std::string hand{"both"};
+    uint64_t request_id{0};
+    uint32_t timeout_ms{5000};
+
+    void fromJson(unitree::common::JsonMap& json) override
+    {
+        JN_FROM(json, "action", action);
+        JN_FROM_WEAK(json, "id", id);
+        JN_FROM_WEAK(json, "name", name);
+        JN_FROM_WEAK(json, "right", right);
+        JN_FROM_WEAK(json, "left", left);
+        JN_FROM_WEAK(json, "delays_ms", delays_ms);
+        JN_FROM_WEAK(json, "hand", hand);
+        JN_FROM_WEAK(json, "request_id", request_id);
+        JN_FROM_WEAK(json, "timeout_ms", timeout_ms);
+    }
+
+    void toJson(unitree::common::JsonMap& json) const override
+    {
+        JN_TO(json, "action", action);
+        JN_TO(json, "id", id);
+        JN_TO(json, "name", name);
+        JN_TO(json, "right", right);
+        JN_TO(json, "left", left);
+        JN_TO(json, "delays_ms", delays_ms);
+        JN_TO(json, "hand", hand);
+        JN_TO(json, "request_id", request_id);
+        JN_TO(json, "timeout_ms", timeout_ms);
+    }
+};
+
 class OperationReply : public unitree::common::Jsonize
 {
 public:
@@ -226,6 +298,40 @@ public:
         JN_TO(json, "lost_count", lost_count);
         JN_TO(json, "last_command_id", last_command_id);
         JN_TO(json, "timestamp_ms", timestamp_ms);
+    }
+};
+
+class PoseReply : public unitree::common::Jsonize
+{
+public:
+    int32_t code{0};
+    std::string message;
+    uint64_t request_id{0};
+    Pose pose;
+    std::vector<Pose> poses;
+    uint32_t duration_ms{0};
+    std::vector<std::string> affected_hands;
+
+    void fromJson(unitree::common::JsonMap& json) override
+    {
+        JN_FROM(json, "code", code);
+        JN_FROM(json, "message", message);
+        JN_FROM_WEAK(json, "request_id", request_id);
+        JN_FROM_WEAK(json, "pose", pose);
+        JN_FROM_WEAK(json, "poses", poses);
+        JN_FROM_WEAK(json, "duration_ms", duration_ms);
+        JN_FROM_WEAK(json, "affected_hands", affected_hands);
+    }
+
+    void toJson(unitree::common::JsonMap& json) const override
+    {
+        JN_TO(json, "code", code);
+        JN_TO(json, "message", message);
+        JN_TO(json, "request_id", request_id);
+        JN_TO(json, "pose", pose);
+        JN_TO(json, "poses", poses);
+        JN_TO(json, "duration_ms", duration_ms);
+        JN_TO(json, "affected_hands", affected_hands);
     }
 };
 
