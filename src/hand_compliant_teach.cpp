@@ -1,7 +1,8 @@
 #include "compliant_teach.hpp"
 #include "compliant_teach_config.hpp"
-#include "inspire.h"
-#include "rh56/writer.hpp"
+#include "rh56/hand_client.hpp"
+
+#include <unitree/robot/channel/channel_factory.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,15 +11,14 @@
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
-#include <unistd.h>
 
 namespace {
 constexpr std::array<const char*, 6> kJointNames{
@@ -35,48 +35,10 @@ std::filesystem::path ProjectRoot(const char* executable)
         .parent_path().parent_path().parent_path();
 }
 
-class PidFile
-{
-public:
-    explicit PidFile(const char* executable)
-    {
-        path_ = ProjectRoot(executable) / "run" / "hand_controller.pid";
-        std::filesystem::create_directories(path_.parent_path());
-        std::ofstream(path_) << getpid() << '\n';
-    }
-
-    ~PidFile()
-    {
-        std::error_code error;
-        std::filesystem::remove(path_, error);
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
 int Median(std::vector<int16_t> values)
 {
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
-}
-
-template <typename ReadOperation>
-bool ReadWithRetry(ReadOperation operation)
-{
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        if (operation() == 0)
-            return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return false;
-}
-
-bool WriteJoints(const std::string& device, const rh56::Position& position,
-                 const rh56::JointMask& mask)
-{
-    Rh56Writer writer(device);
-    return writer.WritePosition(position, mask);
 }
 
 std::optional<std::size_t> JointIndex(const std::string& name)
@@ -98,11 +60,16 @@ std::optional<float> ProfileStep(const CompliantTeachAppConfig& config,
 
 struct HandRuntime
 {
+    HandRuntime(std::string hand_name, const rh56::JointMask& joint_selection,
+                std::shared_ptr<rh56::HandClient> hand_client)
+        : name(std::move(hand_name)), selected(joint_selection),
+          client(std::move(hand_client))
+    {}
+
     std::string name;
-    std::string device;
     rh56::JointMask selected{};
-    std::shared_ptr<SerialPort> serial;
-    std::unique_ptr<inspire::InspireHand> hand;
+    std::shared_ptr<rh56::HandClient> client;
+    rh56::StateReply state;
     std::array<std::unique_ptr<CompliantTeach>, 6> teach;
     rh56::JointMask pending{};
     std::chrono::steady_clock::time_point resume_at{};
@@ -119,10 +86,38 @@ struct HandRuntime
     }
 };
 
+bool ReadState(HandRuntime& runtime)
+{
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (runtime.client->GetState(runtime.name, runtime.state, true) == 0 &&
+            runtime.state.online && runtime.state.feedback_q.size() == 6 &&
+            runtime.state.force.size() == 6 && runtime.state.current.size() == 6 &&
+            runtime.state.error.size() == 6 && runtime.state.temperature.size() == 6)
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+bool WriteJoints(HandRuntime& runtime, const rh56::Position& position,
+                 const rh56::JointMask& mask)
+{
+    rh56::SetTargetsRequest request;
+    request.hand = runtime.name;
+    request.joint_mask = rh56::EncodeMask(mask);
+    request.q.assign(position.begin(), position.end());
+    request.command_id = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    request.timeout_ms = 5000;
+    rh56::OperationReply reply;
+    return runtime.client->SetTargets(request, reply) == 0;
+}
+
 bool SelectedTelemetrySafe(const HandRuntime& runtime,
-                           const inspire::InspireHand::RawValues& current,
-                           const inspire::InspireHand::StatusValues& error,
-                           const inspire::InspireHand::StatusValues& temperature,
+                           const std::vector<int32_t>& current,
+                           const std::vector<int32_t>& error,
+                           const std::vector<int32_t>& temperature,
                            int maximum_current_mA, int maximum_temperature_C)
 {
     for (std::size_t joint = 0; joint < runtime.selected.size(); ++joint) {
@@ -139,24 +134,16 @@ bool InitializeHand(HandRuntime& runtime,
                     const CompliantTeach::Config& config, bool full_range,
                     const CompliantTeachAppConfig& app_config)
 {
-    runtime.serial =
-        std::make_shared<SerialPort>(runtime.device, B115200, 50);
-    runtime.hand = std::make_unique<inspire::InspireHand>(runtime.serial, 1);
-
-    Eigen::Matrix<double, 6, 1> position{};
-    inspire::InspireHand::StatusValues error{};
-    inspire::InspireHand::StatusValues temperature{};
-    if (!ReadWithRetry([&] { return runtime.hand->GetPosition(position); }) ||
-        !ReadWithRetry([&] { return runtime.hand->GetError(error); }) ||
-        !ReadWithRetry([&] { return runtime.hand->GetTemperature(temperature); })) {
+    if (!ReadState(runtime)) {
         std::cerr << runtime.name << ": preflight telemetry read failed\n";
         return false;
     }
 
     for (std::size_t joint = 0; joint < runtime.selected.size(); ++joint) {
         if (runtime.selected[joint] &&
-            (error[joint] != 0 ||
-             temperature[joint] >= app_config.maximum_temperature_C)) {
+            (runtime.state.error[joint] != 0 ||
+             runtime.state.temperature[joint] >=
+                 app_config.maximum_temperature_C)) {
             std::cerr << runtime.name << '_' << kJointNames[joint]
                       << ": preflight rejected: fault or high temperature\n";
             return false;
@@ -167,14 +154,14 @@ bool InitializeHand(HandRuntime& runtime,
               << ": keep selected joints unloaded while measuring baseline...\n";
     std::array<std::vector<int16_t>, 6> samples;
     for (int sample = 0; sample < app_config.baseline_samples; ++sample) {
-        inspire::InspireHand::RawValues force{};
-        if (!ReadWithRetry([&] { return runtime.hand->GetForceRaw(force); })) {
+        if (!ReadState(runtime)) {
             std::cerr << runtime.name << ": force baseline read failed\n";
             return false;
         }
         for (std::size_t joint = 0; joint < runtime.selected.size(); ++joint)
             if (runtime.selected[joint])
-                samples[joint].push_back(force[joint]);
+                samples[joint].push_back(
+                    static_cast<int16_t>(runtime.state.force[joint]));
         std::this_thread::sleep_for(
             std::chrono::milliseconds(
                 app_config.baseline_sample_period_ms));
@@ -184,7 +171,7 @@ bool InitializeHand(HandRuntime& runtime,
         if (!runtime.selected[joint])
             continue;
         const int baseline = Median(samples[joint]);
-        const float initial = static_cast<float>(position(joint));
+        const float initial = runtime.state.feedback_q[joint];
         CompliantTeach::Config joint_config = ApplyJointOverride(
             config, app_config, runtime.name, kJointNames[joint]);
         runtime.teach[joint] =
@@ -208,17 +195,17 @@ bool InitializeHand(HandRuntime& runtime,
 
 bool ResumeAfterBlank(HandRuntime& runtime)
 {
-    inspire::InspireHand::StatusValues error{};
-    if (!ReadWithRetry([&] { return runtime.hand->GetError(error); })) {
+    if (!ReadState(runtime)) {
         std::cerr << runtime.name << ": post-step error read failed\n";
         return false;
     }
     for (std::size_t joint = 0; joint < runtime.pending.size(); ++joint) {
         if (!runtime.pending[joint])
             continue;
-        if (error[joint] != 0) {
+        if (runtime.state.error[joint] != 0) {
             std::cerr << runtime.name << '_' << kJointNames[joint]
-                      << ": post-step error_bits=" << +error[joint] << '\n';
+                      << ": post-step error_bits=" << runtime.state.error[joint]
+                      << '\n';
             return false;
         }
         runtime.teach[joint]->MarkMotionSettled();
@@ -229,18 +216,11 @@ bool ResumeAfterBlank(HandRuntime& runtime)
     return true;
 }
 
-bool SafetyCheck(HandRuntime& runtime, int maximum_current_mA,
+bool SafetyCheck(const HandRuntime& runtime, int maximum_current_mA,
                  int maximum_temperature_C)
 {
-    inspire::InspireHand::RawValues current{};
-    inspire::InspireHand::StatusValues error{};
-    inspire::InspireHand::StatusValues temperature{};
-    const bool read_ok =
-        ReadWithRetry([&] { return runtime.hand->GetCurrent(current); }) &&
-        ReadWithRetry([&] { return runtime.hand->GetError(error); }) &&
-        ReadWithRetry([&] { return runtime.hand->GetTemperature(temperature); });
-    if (!read_ok ||
-        !SelectedTelemetrySafe(runtime, current, error, temperature,
+    if (!SelectedTelemetrySafe(runtime, runtime.state.current,
+                               runtime.state.error, runtime.state.temperature,
                                maximum_current_mA,
                                maximum_temperature_C)) {
         std::cerr << runtime.name
@@ -262,11 +242,11 @@ bool ProcessHand(HandRuntime& runtime, int blank_ms, int settle_ms,
             return false;
     }
 
-    inspire::InspireHand::RawValues force{};
-    if (!ReadWithRetry([&] { return runtime.hand->GetForceRaw(force); })) {
+    if (!ReadState(runtime)) {
         std::cerr << runtime.name << ": force read failed; holding targets\n";
         return false;
     }
+    const auto& force = runtime.state.force;
 
     std::array<bool, 6> permitted{};
     permitted.fill(true);
@@ -366,7 +346,7 @@ bool ProcessHand(HandRuntime& runtime, int blank_ms, int settle_ms,
 
     if (std::any_of(command_mask.begin(), command_mask.end(),
                     [](bool value) { return value; })) {
-        if (!WriteJoints(runtime.device, targets, command_mask)) {
+        if (!WriteJoints(runtime, targets, command_mask)) {
             std::cerr << runtime.name
                       << ": position write failed; holding targets\n";
             return false;
@@ -394,7 +374,7 @@ void PrintUsage(const char* executable)
            " [--duration seconds] [--close-delta raw]"
            " [--open-delta raw] [--open-floor raw]"
            " [--blank-ms ms] [--settle-ms ms]"
-           " [--full-range] [--execute]\n";
+           " [--full-range] [--network INTERFACE] [--execute]\n";
 }
 }  // namespace
 
@@ -422,6 +402,7 @@ int main(int argc, char** argv)
     std::string hand_selection = app_config.default_hand;
     std::string joint_selection = app_config.default_joint;
     std::string profile = app_config.default_profile;
+    std::string network;
     int duration_seconds = app_config.duration_seconds;
     int blank_ms = app_config.motion_blank_ms;
     int settle_ms = app_config.extra_settle_ms;
@@ -441,6 +422,8 @@ int main(int argc, char** argv)
             joint_selection = argv[++i];
         else if (arg == "--profile" && i + 1 < argc)
             profile = argv[++i];
+        else if (arg == "--network" && i + 1 < argc)
+            network = argv[++i];
         else if (arg == "--step" && i + 1 < argc) {
             teach_config.step = std::stof(argv[++i]);
             custom_step = true;
@@ -500,14 +483,15 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, StopHandler);
 
     try {
-        PidFile pid_file(argv[0]);
+        unitree::robot::ChannelFactory::Instance()->Init(0, network);
+        auto client = std::make_shared<rh56::HandClient>();
+        client->SetTimeout(2.0f);
+        client->Init();
         std::vector<HandRuntime> hands;
         if (hand_selection == "left" || hand_selection == "both")
-            hands.push_back(
-                HandRuntime{"left", app_config.left_serial, selected});
+            hands.push_back(HandRuntime{"left", selected, client});
         if (hand_selection == "right" || hand_selection == "both")
-            hands.push_back(
-                HandRuntime{"right", app_config.right_serial, selected});
+            hands.push_back(HandRuntime{"right", selected, client});
 
         std::cout << "config=" << config_path << " profile=" << profile
                   << " step=" << teach_config.step
@@ -522,9 +506,8 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        std::cout << "ACTIVE bidirectional quasi-static teaching. Ctrl+C or "
-                     "scripts/hand_estop.sh "
-                  << hand_selection << " stops it.\n";
+        std::cout << "ACTIVE bidirectional quasi-static teaching. "
+                     "Ctrl+C stops it.\n";
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(duration_seconds);
         while (!stop_requested && std::chrono::steady_clock::now() < deadline) {

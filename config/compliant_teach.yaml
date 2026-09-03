@@ -1,7 +1,3 @@
-hardware:
-  left_serial: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if02-port0
-  right_serial: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if01-port0
-
 defaults:
   hand: both
   joint: all

@@ -18,8 +18,6 @@ struct CompliantTeachJointOverride
 
 struct CompliantTeachAppConfig
 {
-    std::string left_serial;
-    std::string right_serial;
     std::string default_hand;
     std::string default_joint;
     std::string default_profile;
@@ -69,8 +67,6 @@ inline CompliantTeachAppConfig LoadCompliantTeachConfig(
     const YAML::Node root = YAML::LoadFile(path);
     CompliantTeachAppConfig config;
 
-    config.left_serial = root["hardware"]["left_serial"].as<std::string>();
-    config.right_serial = root["hardware"]["right_serial"].as<std::string>();
     config.default_hand = root["defaults"]["hand"].as<std::string>();
     config.default_joint = root["defaults"]["joint"].as<std::string>();
     config.default_profile = root["defaults"]["profile"].as<std::string>();

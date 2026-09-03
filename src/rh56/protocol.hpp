@@ -138,13 +138,6 @@ inline WriteRequest MakeWritePosition(uint8_t id, const Position& position,
     return request;
 }
 
-inline WriteRequest MakeWritePosition(uint8_t id, const Position& position)
-{
-    JointMask all{};
-    all.fill(true);
-    return MakeWritePosition(id, position, all);
-}
-
 inline bool ParsePosition(const ReadResponse& response, uint8_t id,
                           Position& position)
 {

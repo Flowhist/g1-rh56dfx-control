@@ -49,7 +49,7 @@ public:
     {
     }
 
-    CompliantTeach(int baseline, float initial_target, Config config)
+    CompliantTeach(int baseline, float initial_target, const Config& config)
         : baseline_(baseline), initial_target_(initial_target),
           target_(initial_target), config_(config)
     {
@@ -73,13 +73,13 @@ public:
             return result;
 
         const int force = Median(force_window_);
-        const int close_threshold = baseline_ - config_.close_delta;
-        const int open_threshold =
+        const int close_force_threshold = baseline_ - config_.close_delta;
+        const int open_force_threshold =
             std::max(baseline_ + config_.open_delta, config_.open_floor);
         int candidate = 0;
-        if (force < close_threshold)
+        if (force < close_force_threshold)
             candidate = -1;
-        else if (force > open_threshold)
+        else if (force > open_force_threshold)
             candidate = 1;
 
         if (config_.opposite_force_releases && last_direction_ != 0 &&

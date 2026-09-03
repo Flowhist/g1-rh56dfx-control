@@ -1,9 +1,9 @@
-#include "rh56/readonly.hpp"
-#include "rh56/writer.hpp"
+#include "rh56/hand_client.hpp"
+
+#include <unitree/robot/channel/channel_factory.hpp>
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
@@ -23,7 +23,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -37,13 +36,8 @@
 
 namespace {
 
-constexpr const char* kRightDevice =
-    "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if01-port0";
-constexpr const char* kLeftDevice =
-    "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTABQDTD-if02-port0";
 constexpr std::size_t kMaximumRequestBytes = 64 * 1024;
 constexpr int16_t kMaximumGripCurrentMa = 300;
-constexpr uint8_t kMaximumGripTemperatureC = 60;
 
 volatile std::sig_atomic_t stop_requested = 0;
 int server_fd = -1;
@@ -58,12 +52,13 @@ void StopHandler(int)
 struct AppConfig
 {
     std::string bind_address{"0.0.0.0"};
+    std::string network;
     uint16_t port{8080};
     std::string hand{"both"};
-    bool execute{false};
     std::filesystem::path assets;
     std::filesystem::path poses_file;
     std::string session_token;
+    std::shared_ptr<rh56::HandClient> hand_client;
 };
 
 void PrintAccessUrls(const AppConfig& config)
@@ -119,39 +114,6 @@ std::filesystem::path ProjectRoot(const char* executable)
     return std::filesystem::weakly_canonical(executable)
         .parent_path().parent_path().parent_path();
 }
-
-class PidFile
-{
-public:
-    explicit PidFile(const std::filesystem::path& root)
-        : path_(root / "run" / "hand_controller.pid")
-    {
-        std::filesystem::create_directories(path_.parent_path());
-        if (std::filesystem::exists(path_)) {
-            std::ifstream input(path_);
-            int existing_pid = 0;
-            if ((input >> existing_pid) && existing_pid > 0 &&
-                std::filesystem::exists("/proc/" + std::to_string(existing_pid)))
-                throw std::runtime_error(
-                    "Another hand controller is active (PID " +
-                    std::to_string(existing_pid) + ")");
-        }
-        std::ofstream(path_, std::ios::trunc) << getpid() << '\n';
-    }
-
-    ~PidFile()
-    {
-        std::ifstream input(path_);
-        int owner = 0;
-        if ((input >> owner) && owner == getpid()) {
-            std::error_code error;
-            std::filesystem::remove(path_, error);
-        }
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 struct HttpRequest
 {
@@ -313,7 +275,8 @@ std::string JsonEscape(const std::string& value)
     return out.str();
 }
 
-std::string PositionJson(const rh56::Position& position)
+template <typename Values>
+std::string PositionJson(const Values& position)
 {
     std::ostringstream out;
     out << std::fixed << std::setprecision(3) << '[';
@@ -330,11 +293,6 @@ bool HandEnabled(const AppConfig& config, const std::string& hand)
     return hand == config.hand || config.hand == "both";
 }
 
-const char* HandDevice(const std::string& hand)
-{
-    return hand == "right" ? kRightDevice : kLeftDevice;
-}
-
 std::string ReadAsset(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
@@ -347,28 +305,26 @@ std::string ReadAsset(const std::filesystem::path& path)
 void ServeStatus(int fd, const AppConfig& config)
 {
     std::ostringstream json;
-    json << "{\"execute\":" << (config.execute ? "true" : "false")
-         << ",\"selection\":\"" << config.hand << "\",\"token\":\""
+    json << "{\"selection\":\"" << config.hand << "\",\"token\":\""
          << config.session_token << "\",\"positions\":{";
     bool first = true;
     std::vector<std::string> errors;
 
-    if (config.execute) {
-        for (const std::string hand : {"right", "left"}) {
-            if (!HandEnabled(config, hand))
-                continue;
-            try {
-                rh56::Position position{};
-                Rh56Readonly reader(HandDevice(hand));
-                if (!reader.ReadPosition(position))
-                    throw std::runtime_error("position read timed out");
-                if (!first)
-                    json << ',';
-                first = false;
-                json << '"' << hand << "\":" << PositionJson(position);
-            } catch (const std::exception& error) {
-                errors.push_back(hand + ": " + error.what());
-            }
+    for (const std::string hand : {"right", "left"}) {
+        if (!HandEnabled(config, hand))
+            continue;
+        rh56::StateReply state;
+        const int32_t result = config.hand_client->GetState(hand, state);
+        if (result == 0 && state.online) {
+            if (!first)
+                json << ',';
+            first = false;
+            json << '"' << hand << "\":" << PositionJson(state.feedback_q);
+        } else {
+            const std::string message = state.message.empty()
+                                            ? "hand service unavailable"
+                                            : state.message;
+            errors.push_back(hand + ": " + message);
         }
     }
     json << "},\"errors\":[";
@@ -396,11 +352,6 @@ std::string RegisterValuesJson(const Values& values)
 
 void ServeRegisters(int fd, const AppConfig& config, const std::string& hand)
 {
-    if (!config.execute) {
-        Respond(fd, 403, "Forbidden", "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"Register monitoring requires --execute\"}");
-        return;
-    }
     if ((hand != "left" && hand != "right") || !HandEnabled(config, hand)) {
         Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
                 "{\"ok\":false,\"error\":\"Hand is not enabled\"}");
@@ -408,37 +359,29 @@ void ServeRegisters(int fd, const AppConfig& config, const std::string& hand)
     }
 
     try {
-        rh56::RawValues position{};
-        rh56::RawValues force{};
-        rh56::RawValues current{};
-        rh56::RawValues force_limit{};
-        rh56::RawValues current_limit{};
-        rh56::ByteValues error{};
-        rh56::ByteValues status{};
-        rh56::ByteValues temperature{};
-        Rh56Readonly reader(HandDevice(hand));
-        const bool ok =
-            reader.ReadWords(0x060A, position) &&
-            reader.ReadWords(0x062E, force) &&
-            reader.ReadWords(0x063A, current) &&
-            reader.ReadWords(0x05DA, force_limit) &&
-            reader.ReadWords(0x03FC, current_limit) &&
-            reader.ReadBytes(0x0646, error) &&
-            reader.ReadBytes(0x064C, status) &&
-            reader.ReadBytes(0x0652, temperature);
-        if (!ok)
-            throw std::runtime_error("register read timed out or checksum failed");
+        rh56::StateReply state;
+        const int32_t result = config.hand_client->GetState(hand, state, true);
+        if (result != 0 || !state.online)
+            throw std::runtime_error(state.message.empty()
+                                         ? "hand service unavailable"
+                                         : state.message);
+        std::vector<int32_t> position;
+        position.reserve(state.feedback_q.size());
+        std::transform(state.feedback_q.begin(), state.feedback_q.end(),
+                       std::back_inserter(position), [](float q) {
+                           return static_cast<int32_t>(std::lround(q * 1000.0f));
+                       });
 
         std::ostringstream json;
         json << "{\"ok\":true,\"hand\":\"" << hand
              << "\",\"position\":" << RegisterValuesJson(position)
-             << ",\"force\":" << RegisterValuesJson(force)
-             << ",\"current\":" << RegisterValuesJson(current)
-             << ",\"force_limit\":" << RegisterValuesJson(force_limit)
-             << ",\"current_limit\":" << RegisterValuesJson(current_limit)
-             << ",\"error\":" << RegisterValuesJson(error)
-             << ",\"status\":" << RegisterValuesJson(status)
-             << ",\"temperature\":" << RegisterValuesJson(temperature)
+             << ",\"force\":" << RegisterValuesJson(state.force)
+             << ",\"current\":" << RegisterValuesJson(state.current)
+             << ",\"force_limit\":" << RegisterValuesJson(state.force_limit)
+             << ",\"current_limit\":" << RegisterValuesJson(state.current_limit)
+             << ",\"error\":" << RegisterValuesJson(state.error)
+             << ",\"status\":" << RegisterValuesJson(state.status)
+             << ",\"temperature\":" << RegisterValuesJson(state.temperature)
              << '}';
         Respond(fd, 200, "OK", "application/json; charset=utf-8", json.str());
     } catch (const std::exception& error) {
@@ -467,11 +410,6 @@ std::optional<int> ParseInteger(const std::string& text, int minimum,
 
 void ServeGrip(int fd, const AppConfig& config, const HttpRequest& request)
 {
-    if (!config.execute) {
-        Respond(fd, 403, "Forbidden", "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"Server is in preview mode\"}");
-        return;
-    }
     const auto fields = ParseForm(request.body);
     const auto hand = fields.find("hand");
     const auto token = fields.find("token");
@@ -500,41 +438,21 @@ void ServeGrip(int fd, const AppConfig& config, const HttpRequest& request)
     }
 
     try {
-        rh56::RawValues measured_current{};
-        rh56::ByteValues error{};
-        rh56::ByteValues temperature{};
-        {
-            Rh56Readonly reader(HandDevice(hand->second));
-            if (!reader.ReadWords(0x063A, measured_current) ||
-                !reader.ReadBytes(0x0646, error) ||
-                !reader.ReadBytes(0x0652, temperature))
-                throw std::runtime_error("pre-grip safety telemetry read failed");
-        }
-        for (std::size_t joint = 0; joint < 6; ++joint) {
-            if (error[joint] != 0)
-                throw std::runtime_error("joint " + std::to_string(joint) +
-                                         " has error bits " +
-                                         std::to_string(error[joint]));
-            if (temperature[joint] >= kMaximumGripTemperatureC)
-                throw std::runtime_error("joint " + std::to_string(joint) +
-                                         " is too hot");
-            if (std::abs(static_cast<int>(measured_current[joint])) >=
-                kMaximumGripCurrentMa)
-                throw std::runtime_error("joint " + std::to_string(joint) +
-                                         " current is already at the safety limit");
-        }
-
-        rh56::RawValues force_limits{};
-        rh56::RawValues current_limits{};
-        force_limits.fill(static_cast<int16_t>(*force_grams));
-        current_limits.fill(static_cast<int16_t>(*current_ma));
-        rh56::JointMask all{};
-        all.fill(true);
-        Rh56Writer writer(HandDevice(hand->second));
-        if (!writer.WriteWords(0x03FC, current_limits, 1500) ||
-            !writer.WriteWords(0x05DA, force_limits, 1000) ||
-            !writer.WritePosition(*targets, all))
-            throw std::runtime_error("grip configuration or target was not acknowledged");
+        rh56::GripRequest grip;
+        grip.hand = hand->second;
+        grip.q.assign(targets->begin(), targets->end());
+        grip.force_grams = *force_grams;
+        grip.current_ma = *current_ma;
+        grip.command_id = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        grip.timeout_ms = 5000;
+        rh56::OperationReply reply;
+        const int32_t result = config.hand_client->ApplyGrip(grip, reply);
+        if (result != 0)
+            throw std::runtime_error(reply.message.empty()
+                                         ? "hand service grip call failed"
+                                         : reply.message);
         Respond(fd, 200, "OK", "application/json; charset=utf-8",
                 "{\"ok\":true,\"force\":" + std::to_string(*force_grams) +
                     ",\"current\":" + std::to_string(*current_ma) + '}');
@@ -549,11 +467,6 @@ void ServeGrip(int fd, const AppConfig& config, const HttpRequest& request)
 void ServeClearFault(int fd, const AppConfig& config,
                      const HttpRequest& request)
 {
-    if (!config.execute) {
-        Respond(fd, 403, "Forbidden", "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"Server is in preview mode\"}");
-        return;
-    }
     const auto fields = ParseForm(request.body);
     const auto hand = fields.find("hand");
     const auto joint = fields.find("joint");
@@ -576,59 +489,27 @@ void ServeClearFault(int fd, const AppConfig& config,
     }
 
     try {
-        rh56::Position position{};
-        rh56::ByteValues error{};
-        rh56::ByteValues status{};
-        rh56::ByteValues temperature{};
-        {
-            Rh56Readonly reader(HandDevice(hand->second));
-            if (!reader.ReadPosition(position) ||
-                !reader.ReadBytes(0x0646, error) ||
-                !reader.ReadBytes(0x064C, status) ||
-                !reader.ReadBytes(0x0652, temperature))
-                throw std::runtime_error("pre-clear telemetry read failed");
-        }
-        if (error[*joint_index] == 0 && status[*joint_index] != 7) {
-            Respond(fd, 200, "OK", "application/json; charset=utf-8",
-                    "{\"ok\":true,\"cleared\":false,\"message\":\"No fault is present\"}");
-            return;
-        }
-        for (std::size_t i = 0; i < error.size(); ++i)
-            if (error[i] != 0 && temperature[i] >= kMaximumGripTemperatureC)
-                throw std::runtime_error(
-                    "faulted joint " + std::to_string(i) +
-                    " is too hot; wait for the overtemperature fault to auto-clear");
-
-        rh56::JointMask recover{};
-        for (std::size_t i = 0; i < error.size(); ++i)
-            recover[i] = error[i] != 0 || status[i] == 7;
-        {
-            Rh56Writer writer(HandDevice(hand->second));
-            if (!writer.WritePosition(position, recover))
-                throw std::runtime_error("failed to hold faulted joints at current feedback");
-            if (error[*joint_index] != 0 && !writer.ClearErrors())
-                throw std::runtime_error("clear-error register write was not acknowledged");
-            if (!writer.WritePosition(position, recover))
-                throw std::runtime_error("failed to re-enable current-position hold");
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        {
-            Rh56Readonly reader(HandDevice(hand->second));
-            if (!reader.ReadBytes(0x0646, error) ||
-                !reader.ReadBytes(0x064C, status) ||
-                !reader.ReadBytes(0x0652, temperature))
-                throw std::runtime_error("post-clear telemetry read failed");
-        }
-        const bool cleared =
-            error[*joint_index] == 0 && status[*joint_index] != 7;
+        rh56::ClearFaultRequest clear;
+        clear.hand = hand->second;
+        clear.joint_mask = uint32_t{1} << *joint_index;
+        clear.request_id = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        rh56::OperationReply reply;
+        const int32_t result = config.hand_client->ClearFault(clear, reply);
+        const bool cleared = result == 0 && reply.affected_mask != 0;
+        const bool ok = result == 0;
         const std::string body =
-            "{\"ok\":" + std::string(cleared ? "true" : "false") +
+            "{\"ok\":" + std::string(ok ? "true" : "false") +
             ",\"cleared\":" + std::string(cleared ? "true" : "false") +
-            ",\"error\":" + RegisterValuesJson(error) +
-            ",\"status\":" + RegisterValuesJson(status) +
-            ",\"temperature\":" + RegisterValuesJson(temperature) +
-            (cleared ? "}" : ",\"message\":\"Fault remains after clear\"}");
-        Respond(fd, cleared ? 200 : 409, cleared ? "OK" : "Conflict",
+            ",\"error\":" + RegisterValuesJson(reply.error) +
+            ",\"status\":" + RegisterValuesJson(reply.status) +
+            ",\"temperature\":" + RegisterValuesJson(reply.temperature) +
+            ",\"message\":\"" + JsonEscape(reply.message) + "\"}";
+        const bool conflict = result == static_cast<int32_t>(
+            rh56::ResultCode::kFaultRemains);
+        Respond(fd, ok ? 200 : (conflict ? 409 : 503),
+                ok ? "OK" : (conflict ? "Conflict" : "Service Unavailable"),
                 "application/json; charset=utf-8", body);
     } catch (const std::exception& error_message) {
         Respond(fd, 503, "Service Unavailable",
@@ -962,11 +843,6 @@ void ServePoseRename(int fd, const AppConfig& config,
 
 void ServeCommand(int fd, const AppConfig& config, const HttpRequest& request)
 {
-    if (!config.execute) {
-        Respond(fd, 403, "Forbidden", "application/json; charset=utf-8",
-                "{\"ok\":false,\"error\":\"Server is in preview mode\"}");
-        return;
-    }
     const auto fields = ParseForm(request.body);
     const auto hand_it = fields.find("hand");
     const auto confirm_it = fields.find("confirm");
@@ -1017,9 +893,28 @@ void ServeCommand(int fd, const AppConfig& config, const HttpRequest& request)
     }
 
     try {
-        Rh56Writer writer(HandDevice(hand_it->second));
-        if (!writer.WritePosition(position, mask))
-            throw std::runtime_error("command was not acknowledged");
+        rh56::SetTargetsRequest command;
+        command.hand = hand_it->second;
+        command.joint_mask = rh56::EncodeMask(mask);
+        command.q.assign(position.begin(), position.end());
+        command.command_id = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        command.timeout_ms = 5000;
+        rh56::OperationReply reply;
+        const int32_t result = config.hand_client->SetTargets(command, reply);
+        if (result != 0) {
+            const bool busy = result == static_cast<int32_t>(
+                rh56::ResultCode::kBusy);
+            Respond(fd, busy ? 409 : 503,
+                    busy ? "Conflict" : "Service Unavailable",
+                    "application/json; charset=utf-8",
+                    "{\"ok\":false,\"error\":\"" +
+                        JsonEscape(reply.message.empty()
+                                       ? "hand service command failed"
+                                       : reply.message) + "\"}");
+            return;
+        }
         Respond(fd, 200, "OK", "application/json; charset=utf-8",
                 "{\"ok\":true}");
     } catch (const std::exception& error) {
@@ -1106,9 +1001,9 @@ void HandleClient(int fd, const AppConfig& config)
 void PrintUsage(const char* executable)
 {
     std::cerr << "Usage: " << executable
-              << " [--execute] [--hand left|right|both]"
+              << " [--hand left|right|both]"
                  " [--bind ADDRESS] [--port PORT] [--assets PATH]"
-                 " [--poses-file PATH]\n";
+                 " [--poses-file PATH] [--network INTERFACE]\n";
 }
 
 std::optional<AppConfig> ParseArguments(int argc, char** argv)
@@ -1120,12 +1015,10 @@ std::optional<AppConfig> ParseArguments(int argc, char** argv)
     config.session_token = RandomToken();
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
-        if (argument == "--execute") {
-            config.execute = true;
-        } else if ((argument == "--hand" || argument == "--bind" ||
-                    argument == "--port" || argument == "--assets" ||
-                    argument == "--poses-file") &&
-                   i + 1 < argc) {
+        if ((argument == "--hand" || argument == "--bind" ||
+             argument == "--port" || argument == "--assets" ||
+             argument == "--poses-file" || argument == "--network") &&
+            i + 1 < argc) {
             const std::string value = argv[++i];
             if (argument == "--hand")
                 config.hand = value;
@@ -1135,6 +1028,8 @@ std::optional<AppConfig> ParseArguments(int argc, char** argv)
                 config.assets = value;
             else if (argument == "--poses-file")
                 config.poses_file = value;
+            else if (argument == "--network")
+                config.network = value;
             else {
                 try {
                     const unsigned long port = std::stoul(value);
@@ -1174,10 +1069,8 @@ int RunServer(const AppConfig& config)
         throw std::runtime_error("listen failed: " + std::string(std::strerror(errno)));
 
     PrintAccessUrls(config);
-    std::cout << "Mode: " << (config.execute ? "HARDWARE (motion enabled)" : "preview")
-              << ", hand: " << config.hand << '\n';
-    if (config.execute)
-        std::cout << "Keep the physical E-stop within immediate reach.\n";
+    std::cout << "Hand: " << config.hand << '\n'
+              << "Keep the physical E-stop within immediate reach.\n";
 
     while (!stop_requested) {
         sockaddr_in peer{};
@@ -1205,7 +1098,7 @@ int RunServer(const AppConfig& config)
 
 int main(int argc, char** argv)
 {
-    const auto config = ParseArguments(argc, argv);
+    auto config = ParseArguments(argc, argv);
     if (!config) {
         PrintUsage(argv[0]);
         return 2;
@@ -1214,9 +1107,20 @@ int main(int argc, char** argv)
     std::signal(SIGINT, StopHandler);
     std::signal(SIGTERM, StopHandler);
     try {
-        std::unique_ptr<PidFile> pid_file;
-        if (config->execute)
-            pid_file = std::make_unique<PidFile>(ProjectRoot(argv[0]));
+        unitree::robot::ChannelFactory::Instance()->Init(0, config->network);
+        config->hand_client = std::make_shared<rh56::HandClient>();
+        config->hand_client->SetTimeout(2.0f);
+        config->hand_client->Init();
+        for (const std::string hand : {"right", "left"}) {
+            if (!HandEnabled(*config, hand))
+                continue;
+            rh56::StateReply state;
+            const int32_t result = config->hand_client->GetState(hand, state);
+            if (result != 0)
+                throw std::runtime_error(
+                    "Cannot connect to hand_service for " + hand +
+                    " (code=" + std::to_string(result) + ")");
+        }
         return RunServer(*config);
     } catch (const std::exception& error) {
         if (server_fd >= 0)

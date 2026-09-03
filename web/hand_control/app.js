@@ -17,9 +17,7 @@ const model = {
   left: Array(6).fill(0.5),
 };
 
-const POSE_STORAGE_KEY = "rh56-hand-poses-v1";
-
-let service = { execute: false, selection: "both" };
+let service = { selection: "both" };
 let armed = false;
 let dragging = 0;
 let toastTimer;
@@ -46,19 +44,6 @@ function escapeHtml(value) {
   })[character]);
 }
 
-function loadBrowserPoses() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(POSE_STORAGE_KEY) || "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(pose => pose && /^[a-zA-Z0-9-]+$/.test(pose.id) &&
-      typeof pose.name === "string" && !Number.isNaN(Date.parse(pose.created)) &&
-      validPoseValues(pose.right) && validPoseValues(pose.left));
-  } catch {
-    return [];
-  }
-}
-
-const browserPoses = loadBrowserPoses();
 let poses = [];
 
 function poseBars(pose) {
@@ -109,21 +94,6 @@ async function loadServerPoses() {
   poses = Array.isArray(result.poses) ? result.poses.filter(pose =>
     pose && validPoseValues(pose.right) && validPoseValues(pose.left)) : [];
 
-  if (browserPoses.length && service.token) {
-    for (const pose of browserPoses) {
-      await poseRequest("/api/poses/save", {
-        id: pose.id,
-        name: pose.name,
-        right: poseValues(pose.right),
-        left: poseValues(pose.left),
-      });
-    }
-    localStorage.removeItem(POSE_STORAGE_KEY);
-    const migrated = await fetch("/api/poses", { cache: "no-store" });
-    const migratedResult = await migrated.json();
-    poses = migratedResult.poses || poses;
-    showToast(`已将 ${browserPoses.length} 个浏览器姿势迁移到本地文件`);
-  }
   renderPoses();
 }
 
@@ -503,13 +473,6 @@ async function refreshRegisters(hand) {
   if (!panel?.open || registerBusy.has(hand)) return;
   const body = panel.querySelector("[data-register-body]");
   const state = panel.querySelector("[data-register-state]");
-  if (!service.execute) {
-    state.textContent = "预览模式";
-    body.innerHTML = '<tr><td colspan="9" class="register-empty">以 --execute 启动后可读取硬件寄存器</td></tr>';
-    panel.querySelector("[data-fault-summary]").textContent = "预览模式不读取故障";
-    return;
-  }
-
   registerBusy.add(hand);
   state.textContent = "读取中…";
   try {
@@ -582,7 +545,7 @@ function applyServiceState() {
           (control.matches("[data-apply], [data-grip]") && !armed);
     });
   });
-  armButton.disabled = !service.execute;
+  armButton.disabled = Boolean(service.errors?.length);
   armButton.classList.toggle("armed", armed);
   armButton.textContent = armed ? "锁定硬件控制" : "解锁硬件控制";
 }
@@ -600,18 +563,16 @@ async function refreshStatus({ quiet = false } = {}) {
       });
       renderAll();
     }
-    if (!data.execute) {
+    if (data.errors?.length) {
       armed = false;
-      setStatus("ready", "预览模式 · 不会运动");
-    } else if (armed) {
-      setStatus("armed", "硬件控制已解锁");
-    } else if (data.errors?.length) {
       setStatus("error", "硬件读取异常");
       if (!quiet) showToast(data.errors.join("；"), true);
+    } else if (armed) {
+      setStatus("armed", "硬件控制已解锁");
     } else {
       setStatus("ready", "硬件在线 · 控制已锁定");
     }
-    if (data.execute && !data.errors?.length)
+    if (!data.errors?.length)
       lastUpdate.textContent = `最近读取 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
     applyServiceState();
   } catch (error) {
