@@ -44,6 +44,8 @@ struct HandState {
     RawValues current{};
     RawValues force_limit{};
     RawValues current_limit{};
+    std::array<bool, kJointCount> contact{};
+    bool contact_monitoring{false};
     ByteValues error{};
     ByteValues status{};
     ByteValues temperature{};

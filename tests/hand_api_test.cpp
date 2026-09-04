@@ -30,6 +30,8 @@ int main()
     state.temperature = {30, 31, 32, 33, 34, 35};
     state.force_limit = {200, 200, 200, 200, 200, 200};
     state.current_limit = {150, 150, 150, 150, 150, 150};
+    state.contact = {false, false, true, false, false, false};
+    state.contact_monitoring = true;
     rh56::StateReply decoded_state;
     unitree::common::FromJsonString(
         unitree::common::ToJsonString(state), decoded_state);
@@ -39,6 +41,10 @@ int main()
         decoded_state.force_limit != state.force_limit ||
         decoded_state.current_limit != state.current_limit) {
         std::cerr << "StateReply JSON round trip failed\n";
+        return 1;
+    }
+    if (!decoded_state.contact_monitoring || !decoded_state.contact[2]) {
+        std::cerr << "contact state JSON round trip failed\n";
         return 1;
     }
 
@@ -120,6 +126,20 @@ int main()
         decoded_pose_list.poses[0].id != pose.id ||
         decoded_pose_list.poses[0].delays_ms != pose.delays_ms) {
         std::cerr << "PoseReply JSON round trip failed\n";
+        return 1;
+    }
+
+    rh56::SettingsMessage settings;
+    settings.write = true;
+    settings.settings.contact_threshold = 75;
+    settings.request_id = 82;
+    rh56::SettingsMessage decoded_settings;
+    unitree::common::FromJsonString(
+        unitree::common::ToJsonString(settings), decoded_settings);
+    if (!decoded_settings.write ||
+        decoded_settings.settings.contact_threshold != 75 ||
+        decoded_settings.request_id != 82) {
+        std::cerr << "SettingsMessage JSON round trip failed\n";
         return 1;
     }
 

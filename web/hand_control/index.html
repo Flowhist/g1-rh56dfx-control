@@ -33,6 +33,20 @@
         页面示意图只反映执行器反馈，不代表外部指骨的真实角度。</p>
     </section>
 
+    <section class="pose-library settings-row" aria-labelledby="settings-title">
+      <div>
+        <h2 id="settings-title">永久参数</h2>
+        <p>空闲接触阈值和每只手的抓握参数都会自动保存到控制服务。</p>
+      </div>
+      <label class="grip-control threshold-control">
+        <span>接触波动阈值</span>
+        <input id="contact-threshold" type="range" min="1" max="1000" step="1" value="50"
+               data-setting="contact_threshold">
+        <output data-setting-output="contact_threshold">50</output>
+      </label>
+      <span id="settings-state" class="settings-state">正在读取…</span>
+    </section>
+
     <section class="pose-library" aria-labelledby="pose-title">
       <div class="pose-heading">
         <div>

@@ -1,4 +1,4 @@
-#include "rh56/pose_store.hpp"
+#include "rh56/persistent_store.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -47,6 +47,17 @@ int main()
                         "stored pose did not survive reload");
         passed &= Check(reloaded.Delete(saved.id), "pose delete failed");
         passed &= Check(!reloaded.Find(saved.id), "deleted pose still exists");
+
+        const auto settings_path = directory / "settings.json";
+        rh56::SettingsStore settings(settings_path);
+        auto value = settings.Get();
+        value.contact_threshold = 75;
+        value.right_grip_force_grams = 350;
+        settings.Set(value);
+        rh56::SettingsStore reloaded_settings(settings_path);
+        passed &= Check(reloaded_settings.Get().contact_threshold == 75 &&
+                            reloaded_settings.Get().right_grip_force_grams == 350,
+                        "settings did not survive reload");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         passed = false;
@@ -56,6 +67,6 @@ int main()
     std::filesystem::remove_all(directory, error);
     if (!passed)
         return 1;
-    std::cout << "pose_store_test: PASS\n";
+    std::cout << "persistent_store_test: PASS\n";
     return 0;
 }

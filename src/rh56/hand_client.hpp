@@ -21,6 +21,7 @@ public:
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiApplyGrip);
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiHold);
         UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiPoses);
+        UT_ROBOT_CLIENT_REG_API_NO_PROI(kApiSettings);
     }
 
     int32_t SetTargets(const SetTargetsRequest& request,
@@ -77,6 +78,21 @@ public:
         request.request_id = request_id;
         request.timeout_ms = timeout_ms;
         return Poses(request, reply);
+    }
+
+    int32_t GetSettings(SettingsMessage& reply)
+    {
+        return CallAndDecode(kApiSettings, SettingsMessage{}, reply);
+    }
+
+    int32_t SetSettings(const HandSettings& value, uint64_t request_id,
+                        SettingsMessage& reply)
+    {
+        SettingsMessage request;
+        request.write = true;
+        request.settings = value;
+        request.request_id = request_id;
+        return CallAndDecode(kApiSettings, request, reply);
     }
 
 private:

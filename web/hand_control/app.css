@@ -150,6 +150,19 @@ h1 {
   font-weight: 900;
 }
 
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(320px, 1.4fr) auto;
+  align-items: center;
+  gap: 20px;
+}
+.settings-row h2 { margin: 0; font-size: 17px; }
+.settings-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.settings-row .threshold-control {
+  grid-template-columns: 100px minmax(120px, 1fr) 48px;
+}
+.settings-state { color: var(--green); font-size: 11px; white-space: nowrap; }
+
 .pose-library {
   margin-bottom: 20px;
   padding: 18px 20px 20px;
@@ -393,6 +406,7 @@ h1 {
 
 .hand-heading h2 { margin: 0; font-size: 20px; }
 .hand-heading span { color: var(--muted); font-size: 12px; }
+.hand-heading b { color: var(--green); font-size: 10px; font-weight: 600; }
 
 .hand-body {
   display: grid;
@@ -433,6 +447,8 @@ h1 {
 }
 
 .joint-name { color: #dce2e5; font-size: 13px; }
+.joint-control.contact .joint-name { color: var(--yellow); font-weight: 700; }
+.joint-control.contact .joint-name::after { content: " · 接触"; font-size: 10px; }
 .joint-value {
   color: #c7d0d4;
   font-variant-numeric: tabular-nums;
@@ -708,6 +724,8 @@ footer {
   .hand-body { grid-template-columns: 1fr; }
   .hand-visual { min-height: 245px; }
   .pose-heading { align-items: flex-start; }
+  .settings-row { grid-template-columns: 1fr; gap: 12px; }
+  .settings-state { justify-self: end; }
   .grip-panel { grid-template-columns: 1fr; }
   .grip-heading, .grip-panel p { grid-column: 1; }
   .grip-button { grid-row: auto; }
@@ -725,6 +743,7 @@ footer {
   .pose-delay-panel summary { align-items: flex-start; flex-direction: column; gap: 2px; }
   .pose-delay-panel summary small { max-width: 100%; text-align: left; }
   .joint-control { grid-template-columns: 68px minmax(70px, 1fr) 46px; gap: 7px; }
+  .threshold-control { grid-template-columns: 92px minmax(80px, 1fr) 40px; }
   .hand-actions { padding-inline: 14px; }
   .action-button.primary { margin-left: 0; }
 }

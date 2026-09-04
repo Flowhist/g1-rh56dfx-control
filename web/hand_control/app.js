@@ -21,6 +21,7 @@ let service = { selection: "both" };
 let armed = false;
 let dragging = 0;
 let toastTimer;
+let settingsTimer;
 const pending = new Map();
 
 const handsRoot = document.querySelector("#hands");
@@ -32,6 +33,7 @@ const lastUpdate = document.querySelector("#last-update");
 const poseList = document.querySelector("#pose-list");
 const savePoseButton = document.querySelector("#save-pose");
 const poseNameInput = document.querySelector("#pose-name");
+const settingsState = document.querySelector("#settings-state");
 
 function validPoseValues(values) {
   return Array.isArray(values) && values.length === 6 &&
@@ -115,7 +117,7 @@ function poseValues(values) {
   return values.map(value => value.toFixed(3)).join(",");
 }
 
-async function poseRequest(path, fields) {
+async function postRequest(path, fields) {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -144,7 +146,7 @@ async function saveCurrentPose() {
   const customName = poseNameInput.value.trim();
   const name = customName || `姿势 ${String(poses.length + 1).padStart(2, "0")}`;
   try {
-    const result = await poseRequest("/api/poses/save", {
+    const result = await postRequest("/api/poses/save", {
       name,
       right: poseValues(model.right),
       left: poseValues(model.left),
@@ -169,7 +171,7 @@ async function replayPose(id) {
     return;
   }
   try {
-    const result = await poseRequest("/api/poses/execute", {
+    const result = await postRequest("/api/poses/execute", {
       id,
       confirm: "execute-pose",
     });
@@ -201,7 +203,7 @@ async function savePoseDelays(id, preset) {
     return;
   }
   try {
-    const result = await poseRequest("/api/poses/delays", {
+    const result = await postRequest("/api/poses/delays", {
       id,
       delays_ms: delays.join(","),
     });
@@ -216,7 +218,7 @@ async function savePoseDelays(id, preset) {
 async function deletePose(id) {
   const pose = poses.find(item => item.id === id);
   try {
-    await poseRequest("/api/poses/delete", { id });
+    await postRequest("/api/poses/delete", { id });
     poses = poses.filter(item => item.id !== id);
     renderPoses();
     if (pose) showToast(`${pose.name}已删除`);
@@ -236,7 +238,7 @@ async function renamePose(id) {
     return;
   }
   try {
-    const result = await poseRequest("/api/poses/rename", { id, name });
+    const result = await postRequest("/api/poses/rename", { id, name });
     poses = poses.map(item => item.id === id ? result.pose : item);
     renderPoses();
     showToast(`已改名为“${result.pose.name}”并自动保存`);
@@ -270,7 +272,7 @@ function handSvg(hand) {
 
 function handCard(hand) {
   const controls = JOINTS.map((joint, index) => `
-    <label class="joint-control">
+    <label class="joint-control" data-contact="${hand.id}:${index}">
       <span class="joint-name">${joint.name}</span>
       <input type="range" min="0" max="100" step="1" data-hand="${hand.id}" data-joint="${index}" aria-label="${hand.label}${joint.name}">
       <output class="joint-value" data-output="${index}">50%</output>
@@ -280,7 +282,7 @@ function handCard(hand) {
     <article class="hand-card" data-card="${hand.id}">
       <div class="hand-heading">
         <h2>${hand.label}</h2>
-        <span>${hand.channel} · ID 1</span>
+        <span><b data-contact-mode="${hand.id}">建立接触基线</b> · ${hand.channel} · ID 1</span>
       </div>
       <div class="hand-body">
         <div class="hand-visual">${handSvg(hand)}</div>
@@ -295,19 +297,21 @@ function handCard(hand) {
       <div class="grip-panel">
         <div class="grip-heading">
           <strong>接触后抓握力</strong>
-          <span>电流硬上限 300 mA</span>
+          <span>调整后自动永久保存</span>
         </div>
         <label class="grip-control">
           <span>力阈值</span>
           <input type="range" min="50" max="1000" step="25" value="300"
-                 data-grip-force="${hand.id}" aria-label="${hand.label}抓握力阈值">
-          <output data-grip-force-output="${hand.id}">300 g</output>
+                 data-grip-force="${hand.id}" data-setting="${hand.id}_grip_force_grams"
+                 data-unit=" g" aria-label="${hand.label}抓握力阈值">
+          <output data-setting-output="${hand.id}_grip_force_grams">300 g</output>
         </label>
         <label class="grip-control">
           <span>电流上限</span>
           <input type="range" min="50" max="300" step="25" value="200"
-                 data-grip-current="${hand.id}" aria-label="${hand.label}抓握电流上限">
-          <output data-grip-current-output="${hand.id}">200 mA</output>
+                 data-grip-current="${hand.id}" data-setting="${hand.id}_grip_current_ma"
+                 data-unit=" mA" aria-label="${hand.label}抓握电流上限">
+          <output data-setting-output="${hand.id}_grip_current_ma">200 mA</output>
         </label>
         <button class="grip-button" type="button" data-grip="${hand.id}">施加抓握并保持目标</button>
         <p>先用较低力值测试；不要抓人体、易碎品或装有热液体的物体。</p>
@@ -346,6 +350,60 @@ function handCard(hand) {
 }
 
 handsRoot.innerHTML = HANDS.map(handCard).join("");
+
+function applySettings(value) {
+  document.querySelectorAll("[data-setting]").forEach(input => {
+    input.value = value[input.dataset.setting];
+    document.querySelector(`[data-setting-output="${input.dataset.setting}"]`).textContent =
+      input.value + (input.dataset.unit || "");
+  });
+}
+
+async function loadSettings() {
+  const response = await fetch("/api/settings", { cache: "no-store" });
+  const result = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  if (!response.ok || !result.ok || !result.settings) {
+    settingsState.textContent = "读取失败";
+    throw new Error(result.error || `HTTP ${response.status}`);
+  }
+  applySettings(result.settings);
+  settingsState.textContent = "已永久保存";
+}
+
+function readSettings() {
+  return Object.fromEntries([...document.querySelectorAll("[data-setting]")]
+    .map(input => [input.dataset.setting, Number(input.value)]));
+}
+
+async function saveSettings() {
+  settingsState.textContent = "正在保存…";
+  try {
+    const result = await postRequest("/api/settings", { settings: JSON.stringify(readSettings()) });
+    applySettings(result.settings);
+    settingsState.textContent = "已永久保存";
+  } catch (error) {
+    settingsState.textContent = "保存失败";
+    showToast(`永久参数保存失败：${error.message}`, true);
+  }
+}
+
+function scheduleSettingsSave() {
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(saveSettings, 250);
+}
+
+function renderContacts() {
+  HANDS.forEach(({ id }) => {
+    const state = service.states?.[id] || {};
+    const monitoring = Boolean(state.contact_monitoring);
+    document.querySelector(`[data-contact-mode="${id}"]`).textContent =
+      monitoring ? "接触监测中" : "接触监测暂停";
+    JOINTS.forEach((_, index) => {
+      const indicator = document.querySelector(`[data-contact="${id}:${index}"]`);
+      indicator.classList.toggle("contact", monitoring && Boolean(state.contact?.[index]));
+    });
+  });
+}
 
 function fingerPoints(hand, index, bend) {
   const bases = hand === "right" ? [78, 103, 130, 158] : [182, 157, 130, 102];
@@ -624,6 +682,7 @@ function applyServiceState() {
   armButton.disabled = Boolean(service.errors?.length);
   armButton.classList.toggle("armed", armed);
   armButton.textContent = armed ? "锁定硬件控制" : "解锁硬件控制";
+  renderContacts();
 }
 
 async function refreshStatus({ quiet = false } = {}) {
@@ -633,7 +692,8 @@ async function refreshStatus({ quiet = false } = {}) {
     const data = await response.json();
     service = data;
     if (!dragging && !armed) {
-      Object.entries(data.positions || {}).forEach(([hand, values]) => {
+      Object.entries(data.states || {}).forEach(([hand, state]) => {
+        const values = state.feedback_q;
         if (model[hand] && Array.isArray(values) && values.length === 6)
           model[hand] = values.map(value => Math.max(0, Math.min(1, Number(value))));
       });
@@ -689,14 +749,12 @@ document.querySelectorAll("[data-apply]").forEach(button => {
   button.addEventListener("click", () => applyHand(button.dataset.apply));
 });
 
-document.querySelectorAll("[data-grip-force], [data-grip-current]").forEach(slider => {
-  const outputSelector = slider.matches("[data-grip-force]")
-    ? `[data-grip-force-output="${slider.dataset.gripForce}"]`
-    : `[data-grip-current-output="${slider.dataset.gripCurrent}"]`;
-  slider.addEventListener("input", () => {
-    slider.closest(".grip-panel").querySelector(outputSelector).textContent =
-      `${slider.value} ${slider.matches("[data-grip-force]") ? "g" : "mA"}`;
+document.querySelectorAll("[data-setting]").forEach(input => {
+  input.addEventListener("input", () => {
+    document.querySelector(`[data-setting-output="${input.dataset.setting}"]`).textContent =
+      input.value + (input.dataset.unit || "");
   });
+  input.addEventListener("change", scheduleSettingsSave);
 });
 
 document.querySelectorAll("[data-grip]").forEach(button => {
@@ -771,9 +829,9 @@ async function initialize() {
   savePoseButton.disabled = true;
   await refreshStatus();
   try {
-    await loadServerPoses();
+    await Promise.all([loadServerPoses(), loadSettings()]);
   } catch (error) {
-    showToast(`姿势文件加载失败：${error.message}`, true);
+    showToast(`永久数据加载失败：${error.message}`, true);
   }
   savePoseButton.disabled = !service.token;
 }

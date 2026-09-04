@@ -33,8 +33,9 @@ cmake --build build --target hand_service hand_compliant_teach hand_hold_positio
 ./build/src/hand_service --execute --hand both --network eth0
 ```
 
-该服务同时加载并管理 `data/hand_poses.json` 中的注册动作。生产环境只启动这个服务即可；
-需要指定其他动作文件时，把 `--poses-file PATH` 加在 `hand_service` 命令后。
+该服务同时加载并管理 `data/hand_poses.json` 中的注册动作，以及
+`data/hand_settings.json` 中的抓握与接触监测参数。生产环境只启动这个服务即可；需要
+指定其他动作文件时，可添加 `--poses-file PATH`。
 
 终端 2：启动网页控制服务。网页进程通过统一 RPC 接口访问 `hand_service`。
 
@@ -114,6 +115,7 @@ ip -br addr
 - 完整状态读取 RPC；
 - 夹持、当前位置保持和故障清除 RPC；
 - 注册动作的查询、保存、修改、删除和带关节延时执行 RPC。
+- 空闲接触状态查询和永久参数读写 RPC。
 
 接口主题、RPC 数据结构、结果码和 C++ 客户端示例见
 [`docs/hand_service_api.md`](docs/hand_service_api.md)。服务运行时不要再启动其他直接访问手部串口的程序。
@@ -131,6 +133,11 @@ ip -br addr
 `HandClient::ListPoses()` 查询 ID，再使用 `HandClient::ExecutePose()` 执行；无需启动
 `hand_web_control`，也不需要 Web token。完整示例见接口文档第 5 节。
 
+每只手卡片会显示六个关节的空闲接触状态。动作控制期间监测自动暂停；手重新空闲后先
+建立力基线，再按“永久参数”中的接触波动阈值判定。上层无需启动 Web，直接查询
+`HandClient::GetState()` 返回的 `contact_monitoring` 和 `contact[6]` 即可。只有
+`contact_monitoring=true` 时接触数组才有效。
+
 每只手都有默认折叠的寄存器监视器。展开后会持续读取位置 (`0x060A`)、力 (`0x062E`)、
 电流 (`0x063A`)、错误 (`0x0646`)、状态 (`0x064C`) 和温度 (`0x0652`)；关闭面板后停止额外轮询。
 
@@ -138,6 +145,10 @@ ip -br addr
 电流、温度和错误状态后重新发送当前位置目标。网页将电流硬限制为 300 mA，不开放固件的
 1500 mA 上限。建议从较小的力值开始逐步增加。位置百分比并不等于实测闭合程度，夹持效果
 还会受到物体形状、摩擦、拇指对置和力传感器标定的影响。
+
+左右手抓握力、抓握电流和空闲接触阈值均为永久参数。网页调整后会自动通过统一 RPC
+写入 `data/hand_settings.json`，重启 Web 或只保留 `hand_service` 都不会丢失。上层可用
+`HandClient::GetSettings()` 和 `HandClient::SetSettings()` 读写同一份配置。
 
 ## 故障清除
 

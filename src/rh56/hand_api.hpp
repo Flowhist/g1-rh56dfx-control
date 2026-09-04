@@ -8,13 +8,14 @@
 namespace rh56 {
 
 inline const std::string kServiceName = "rh56_hand";
-inline const std::string kApiVersion = "1.2.0.0";
+inline const std::string kApiVersion = "1.3.0.0";
 constexpr int32_t kApiSetTargets = 1001;
 constexpr int32_t kApiClearFault = 1002;
 constexpr int32_t kApiGetState = 1003;
 constexpr int32_t kApiApplyGrip = 1004;
 constexpr int32_t kApiHold = 1005;
 constexpr int32_t kApiPoses = 1006;
+constexpr int32_t kApiSettings = 1007;
 
 class SetTargetsRequest : public unitree::common::Jsonize
 {
@@ -206,6 +207,75 @@ public:
     }
 };
 
+class HandSettings : public unitree::common::Jsonize
+{
+public:
+    int32_t right_grip_force_grams{300};
+    int32_t right_grip_current_ma{200};
+    int32_t left_grip_force_grams{300};
+    int32_t left_grip_current_ma{200};
+    int32_t contact_threshold{50};
+
+    void fromJson(unitree::common::JsonMap& json) override
+    {
+        JN_FROM(json, "right_grip_force_grams", right_grip_force_grams);
+        JN_FROM(json, "right_grip_current_ma", right_grip_current_ma);
+        JN_FROM(json, "left_grip_force_grams", left_grip_force_grams);
+        JN_FROM(json, "left_grip_current_ma", left_grip_current_ma);
+        JN_FROM(json, "contact_threshold", contact_threshold);
+    }
+
+    void toJson(unitree::common::JsonMap& json) const override
+    {
+        JN_TO(json, "right_grip_force_grams", right_grip_force_grams);
+        JN_TO(json, "right_grip_current_ma", right_grip_current_ma);
+        JN_TO(json, "left_grip_force_grams", left_grip_force_grams);
+        JN_TO(json, "left_grip_current_ma", left_grip_current_ma);
+        JN_TO(json, "contact_threshold", contact_threshold);
+    }
+};
+
+inline bool ValidSettings(const HandSettings& value)
+{
+    return value.right_grip_force_grams >= 50 &&
+           value.right_grip_force_grams <= 1000 &&
+           value.left_grip_force_grams >= 50 &&
+           value.left_grip_force_grams <= 1000 &&
+           value.right_grip_current_ma >= 50 &&
+           value.right_grip_current_ma <= 300 &&
+           value.left_grip_current_ma >= 50 &&
+           value.left_grip_current_ma <= 300 &&
+           value.contact_threshold >= 1 && value.contact_threshold <= 1000;
+}
+
+class SettingsMessage : public unitree::common::Jsonize
+{
+public:
+    int32_t code{0};
+    std::string message;
+    bool write{false};
+    HandSettings settings;
+    uint64_t request_id{0};
+
+    void fromJson(unitree::common::JsonMap& json) override
+    {
+        JN_FROM_WEAK(json, "code", code);
+        JN_FROM_WEAK(json, "message", message);
+        JN_FROM_WEAK(json, "write", write);
+        JN_FROM_WEAK(json, "settings", settings);
+        JN_FROM_WEAK(json, "request_id", request_id);
+    }
+
+    void toJson(unitree::common::JsonMap& json) const override
+    {
+        JN_TO(json, "code", code);
+        JN_TO(json, "message", message);
+        JN_TO(json, "write", write);
+        JN_TO(json, "settings", settings);
+        JN_TO(json, "request_id", request_id);
+    }
+};
+
 class OperationReply : public unitree::common::Jsonize
 {
 public:
@@ -253,6 +323,8 @@ public:
     std::vector<int32_t> current;
     std::vector<int32_t> force_limit;
     std::vector<int32_t> current_limit;
+    std::vector<bool> contact;
+    bool contact_monitoring{false};
     std::vector<int32_t> error;
     std::vector<int32_t> status;
     std::vector<int32_t> temperature;
@@ -272,6 +344,8 @@ public:
         JN_FROM(json, "current", current);
         JN_FROM(json, "force_limit", force_limit);
         JN_FROM(json, "current_limit", current_limit);
+        JN_FROM_WEAK(json, "contact", contact);
+        JN_FROM_WEAK(json, "contact_monitoring", contact_monitoring);
         JN_FROM(json, "error", error);
         JN_FROM(json, "status", status);
         JN_FROM(json, "temperature", temperature);
@@ -292,6 +366,8 @@ public:
         JN_TO(json, "current", current);
         JN_TO(json, "force_limit", force_limit);
         JN_TO(json, "current_limit", current_limit);
+        JN_TO(json, "contact", contact);
+        JN_TO(json, "contact_monitoring", contact_monitoring);
         JN_TO(json, "error", error);
         JN_TO(json, "status", status);
         JN_TO(json, "temperature", temperature);

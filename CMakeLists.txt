@@ -21,5 +21,5 @@ if(BUILD_TESTING)
 
   add_rh56_test(rh56_controller_test)
   add_rh56_test(hand_api_test unitree_sdk2)
-  add_rh56_test(pose_store_test unitree_sdk2)
+  add_rh56_test(persistent_store_test unitree_sdk2)
 endif()

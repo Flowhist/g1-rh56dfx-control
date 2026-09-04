@@ -3,6 +3,7 @@
 #include "hand_types.hpp"
 #include "transport.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -44,6 +45,7 @@ public:
         if (!transport_->WritePosition(position, mask))
             return {ResultCode::kWriteRejected,
                     "position command was not acknowledged", 0};
+        ResetContactLocked();
         for (std::size_t i = 0; i < mask.size(); ++i)
             if (mask[i])
                 state_.target_q[i] = position[i];
@@ -64,6 +66,7 @@ public:
         if (!transport_->WritePosition(current, all))
             return {ResultCode::kWriteRejected,
                     "current-position hold was not acknowledged", 0};
+        ResetContactLocked();
         state_.feedback_q = current;
         state_.target_q = current;
         target_initialized_ = true;
@@ -109,6 +112,7 @@ public:
             !transport_->WritePosition(position, all))
             return {ResultCode::kWriteRejected,
                     "grip configuration or target was not acknowledged", 0};
+        ResetContactLocked();
 
         state_.current_limit = current_limits;
         state_.force_limit = force_limits;
@@ -140,6 +144,18 @@ public:
             !RefreshHealthLocked())
             return CommunicationFailure("telemetry read failed");
         InitializeTargetLocked();
+        StampOnline();
+        return {};
+    }
+
+    Result RefreshForce(bool monitor_contact, int16_t threshold)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!transport_->ReadWords(0x062E, state_.force)) {
+            ResetContactLocked();
+            return CommunicationFailure("force read failed");
+        }
+        UpdateContactLocked(monitor_contact, threshold);
         StampOnline();
         return {};
     }
@@ -251,9 +267,45 @@ private:
         }
     }
 
+    void UpdateContactLocked(bool enabled, int16_t threshold)
+    {
+        if (!enabled || threshold <= 0) {
+            ResetContactLocked();
+            return;
+        }
+        if (contact_samples_ < 3) {
+            for (std::size_t i = 0; i < kJointCount; ++i)
+                contact_baseline_[i] +=
+                    (state_.force[i] - contact_baseline_[i]) /
+                    static_cast<float>(contact_samples_ + 1);
+            state_.contact.fill(false);
+            state_.contact_monitoring = ++contact_samples_ == 3;
+            return;
+        }
+        state_.contact_monitoring = true;
+        const float release = std::max(1.0f, threshold * 0.5f);
+        for (std::size_t i = 0; i < kJointCount; ++i) {
+            const float delta = std::abs(state_.force[i] - contact_baseline_[i]);
+            state_.contact[i] = delta >=
+                (state_.contact[i] ? release : static_cast<float>(threshold));
+            if (!state_.contact[i])
+                contact_baseline_[i] = contact_baseline_[i] * 0.95f +
+                                       state_.force[i] * 0.05f;
+        }
+    }
+
+    void ResetContactLocked()
+    {
+        state_.contact.fill(false);
+        state_.contact_monitoring = false;
+        contact_samples_ = 0;
+    }
+
     std::unique_ptr<Transport> transport_;
     mutable std::mutex mutex_;
     HandState state_{};
+    std::array<float, kJointCount> contact_baseline_{};
+    uint8_t contact_samples_{0};
     bool health_valid_{false};
     bool target_initialized_{false};
 };

@@ -275,19 +275,6 @@ std::string JsonEscape(const std::string& value)
     return out.str();
 }
 
-template <typename Values>
-std::string PositionJson(const Values& position)
-{
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(3) << '[';
-    for (std::size_t i = 0; i < position.size(); ++i) {
-        if (i)
-            out << ',';
-        out << position[i];
-    }
-    return out.str() + ']';
-}
-
 bool HandEnabled(const AppConfig& config, const std::string& hand)
 {
     return hand == config.hand || config.hand == "both";
@@ -306,7 +293,7 @@ void ServeStatus(int fd, const AppConfig& config)
 {
     std::ostringstream json;
     json << "{\"selection\":\"" << config.hand << "\",\"token\":\""
-         << config.session_token << "\",\"positions\":{";
+         << config.session_token << "\",\"states\":{";
     bool first = true;
     std::vector<std::string> errors;
 
@@ -319,7 +306,8 @@ void ServeStatus(int fd, const AppConfig& config)
             if (!first)
                 json << ',';
             first = false;
-            json << '"' << hand << "\":" << PositionJson(state.feedback_q);
+            json << '"' << hand << "\":"
+                 << unitree::common::ToJsonString(state);
         } else {
             const std::string message = state.message.empty()
                                             ? "hand service unavailable"
@@ -406,6 +394,51 @@ std::optional<int> ParseInteger(const std::string& text, int minimum,
     } catch (...) {
         return std::nullopt;
     }
+}
+
+void ServeSettings(int fd, const AppConfig& config,
+                   const HttpRequest* request = nullptr)
+{
+    rh56::SettingsMessage settings;
+    if (request) {
+        const auto fields = ParseForm(request->body);
+        const auto token = fields.find("token");
+        const auto value = fields.find("settings");
+        if (token == fields.end() || token->second != config.session_token ||
+            value == fields.end()) {
+            Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
+                    "{\"ok\":false,\"error\":\"Invalid settings request\"}");
+            return;
+        }
+        try {
+            unitree::common::FromJsonString(value->second, settings.settings);
+            settings.write = rh56::ValidSettings(settings.settings);
+        } catch (...) {
+        }
+        if (!settings.write) {
+            Respond(fd, 400, "Bad Request", "application/json; charset=utf-8",
+                    "{\"ok\":false,\"error\":\"Invalid settings values\"}");
+            return;
+        }
+    }
+
+    rh56::SettingsMessage reply;
+    const int32_t result = request
+                               ? config.hand_client->SetSettings(
+                                     settings.settings, settings.request_id, reply)
+                               : config.hand_client->GetSettings(reply);
+    if (result != 0) {
+        Respond(fd, 503, "Service Unavailable",
+                "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":\"" +
+                    JsonEscape(reply.message.empty()
+                                   ? "hand service settings call failed"
+                                   : reply.message) + "\"}");
+        return;
+    }
+    Respond(fd, 200, "OK", "application/json; charset=utf-8",
+            "{\"ok\":true,\"settings\":" +
+                unitree::common::ToJsonString(reply.settings) + '}');
 }
 
 void ServeGrip(int fd, const AppConfig& config, const HttpRequest& request)
@@ -904,6 +937,14 @@ void HandleClient(int fd, const AppConfig& config)
     }
     if (request->method == "GET" && request->path == "/api/status") {
         ServeStatus(fd, config);
+        return;
+    }
+    if (request->method == "GET" && request->path == "/api/settings") {
+        ServeSettings(fd, config);
+        return;
+    }
+    if (request->method == "POST" && request->path == "/api/settings") {
+        ServeSettings(fd, config, &*request);
         return;
     }
     if (request->method == "GET" && request->path == "/api/poses") {

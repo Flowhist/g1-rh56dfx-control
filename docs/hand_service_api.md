@@ -5,7 +5,7 @@
 `hand_service` 是左右 RH56 串口的唯一硬件访问进程，对外提供：
 
 - 兼容宇树 Inspire 接口的 DDS 位置命令和状态 Topic；
-- 支持单指控制、故障清除、状态查询和注册动作管理/执行的 Unitree RPC；
+- 支持单指控制、故障清除、状态查询、永久参数和注册动作管理/执行的 Unitree RPC；
 - 头文件形式的 C++ 客户端 `src/rh56/hand_client.hpp`。
 
 位置统一使用归一化值：`0` 表示闭合，`1` 表示张开。单手关节顺序与
@@ -90,7 +90,7 @@ publisher->Write(command);
 ## 4. RPC 接口
 
 - 服务名：`rh56_hand`
-- API 版本：`1.2.0.0`
+- API 版本：`1.3.0.0`
 
 | API ID | 操作 |
 |---:|---|
@@ -100,6 +100,7 @@ publisher->Write(command);
 | 1004 | 设置抓握参数并发送目标 |
 | 1005 | 保持当前位置 |
 | 1006 | 注册动作管理与执行 |
+| 1007 | 查询或修改永久参数 |
 
 Unitree SDK 使用 JSON 字符串承载 RPC 的请求和响应。C++ 上层应直接使用
 `rh56::HandClient`，不要自行发布 SDK 内部的 RPC Topic。
@@ -196,6 +197,8 @@ Unitree SDK 使用 JSON 字符串承载 RPC 的请求和响应。C++ 上层应�
   "current": [0, 0, 0, 0, 0, 0],
   "force_limit": [250, 250, 250, 250, 250, 250],
   "current_limit": [180, 180, 180, 180, 180, 180],
+  "contact": [false, false, false, true, false, false],
+  "contact_monitoring": true,
   "error": [0, 0, 0, 0, 0, 0],
   "status": [1, 1, 1, 1, 1, 1],
   "temperature": [31, 30, 32, 31, 29, 30],
@@ -210,6 +213,12 @@ Unitree SDK 使用 JSON 字符串承载 RPC 的请求和响应。C++ 上层应�
 
 `refresh=false` 返回服务缓存，适合高频状态展示；`refresh=true` 会在返回前读取位置、
 力、电流、限制值、错误、状态和温度，适合诊断和柔顺示教。
+
+`contact` 是按六关节顺序排列的空闲接触判定。只有 `contact_monitoring=true` 时该数组
+才有效；存在 DDS 或 RPC 动作控制时，服务会将整只手的监测暂停并把 `contact` 清为
+`false`，避免动作造成的力波动被误判。手重新空闲后，服务以 10 Hz 读取力传感器，先用
+三次采样建立基线，然后在当前值与基线的绝对差达到永久参数 `contact_threshold` 时置位。
+差值回落到阈值一半以下时清除接触；未接触期间基线会缓慢跟踪静态漂移。
 
 ### 4.4 ApplyGrip，API 1004
 
@@ -236,6 +245,35 @@ Unitree SDK 使用 JSON 字符串承载 RPC 的请求和响应。C++ 上层应�
 服务读取反馈位置并将它设置为新目标，同时取消该手尚未执行的控制命令。正常退出
 `hand_service` 时也会对所有已启用的手执行同样的保持操作。
 
+### 4.6 Settings，API 1007
+
+永久参数由常驻的 `hand_service` 管理，默认写入 `data/hand_settings.json`，因此生产环境
+不需要启动 Web。读取请求：
+
+```json
+{"write":false,"request_id":46}
+```
+
+修改时必须提交完整配置：
+
+```json
+{
+  "write": true,
+  "request_id": 47,
+  "settings": {
+    "right_grip_force_grams": 300,
+    "right_grip_current_ma": 200,
+    "left_grip_force_grams": 300,
+    "left_grip_current_ma": 200,
+    "contact_threshold": 50
+  }
+}
+```
+
+抓握力范围为 `50..1000 g`，电流范围为 `50..300 mA`，接触波动阈值范围为
+`1..1000`（RH56 力寄存器原始单位）。成功响应的 `settings` 返回当前完整配置。Web 中
+调整任一抓握滑块或接触阈值后，会通过该 RPC 自动保存。
+
 ## 5. C++ 客户端用法
 
 ```cpp
@@ -249,7 +287,10 @@ hand.SetTimeout(1.0f);
 hand.Init();
 
 rh56::StateReply state;
-int32_t result = hand.GetState("right", state, true);
+int32_t result = hand.GetState("right", state);  // 空闲接触状态由服务后台持续更新
+
+if (result == 0 && state.contact_monitoring && state.contact[3])
+    std::cout << "右手食指检测到空闲接触\n";
 
 rh56::SetTargetsRequest command;
 command.hand = "right";
@@ -284,6 +325,17 @@ rh56::OperationReply reply;
 int32_t result = hand.ClearFault(request, reply);
 ```
 
+永久参数示例：
+
+```cpp
+rh56::SettingsMessage settings;
+int32_t result = hand.GetSettings(settings);
+
+rh56::HandSettings updated = settings.settings;
+updated.contact_threshold = 75;
+result = hand.SetSettings(updated, 47, settings);
+```
+
 ## 6. 结果码
 
 | 数值 | 名称 | 含义 |
@@ -296,7 +348,7 @@ int32_t result = hand.ClearFault(request, reply);
 | 200 | SERIAL_TIMEOUT | 未收到必要的串口遥测 |
 | 201 | WRITE_REJECTED | 固件未确认写命令 |
 | 202 | INVALID_RESPONSE | 客户端无法解析 RPC 响应 |
-| 203 | STORAGE_ERROR | 注册动作文件读写失败 |
+| 203 | STORAGE_ERROR | 注册动作或永久参数文件读写失败 |
 | 300 | JOINT_FAULTED | 所选关节存在故障，拒绝运动 |
 | 301 | OVER_TEMPERATURE | 过温故障必须冷却后自动恢复 |
 | 302 | FAULT_REMAINS | 清除后错误或故障停止状态仍存在 |

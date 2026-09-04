@@ -165,6 +165,31 @@ void TestGripConfiguration()
           "grip current limit reaches state");
 }
 
+void TestIdleContactDetection()
+{
+    auto transport = std::make_unique<FakeTransport>();
+    auto* fake = transport.get();
+    fake->force.fill(100);
+    rh56::HandController controller(std::move(transport));
+    for (int i = 0; i < 3; ++i)
+        Check(static_cast<bool>(controller.RefreshForce(true, 50)),
+              "idle force sample succeeds");
+    Check(controller.GetState().contact_monitoring,
+          "contact monitoring starts after baseline calibration");
+
+    fake->force[3] = 170;
+    controller.RefreshForce(true, 50);
+    Check(controller.GetState().contact[3], "large force change detects contact");
+    fake->force[3] = 110;
+    controller.RefreshForce(true, 50);
+    Check(!controller.GetState().contact[3], "contact clears with hysteresis");
+
+    controller.RefreshForce(false, 50);
+    Check(!controller.GetState().contact_monitoring &&
+              !controller.GetState().contact[3],
+          "active commands disable contact monitoring");
+}
+
 }  // namespace
 
 int main()
@@ -174,6 +199,7 @@ int main()
     TestFaultClear();
     TestOvertemperatureIsNotCleared();
     TestGripConfiguration();
+    TestIdleContactDetection();
     if (failures == 0)
         std::cout << "rh56_controller_test: PASS\n";
     return failures == 0 ? 0 : 1;

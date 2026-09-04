@@ -22,18 +22,46 @@ namespace rh56 {
 
 constexpr uint32_t kMaximumPoseDelayMs = 3000;
 
+template <typename T>
+T LoadJson(const std::filesystem::path& path, T fallback = {})
+{
+    if (!std::filesystem::exists(path))
+        return fallback;
+    std::ifstream input(path);
+    if (!input)
+        throw std::runtime_error("cannot read " + path.string());
+    const std::string json{std::istreambuf_iterator<char>(input), {}};
+    unitree::common::FromJsonString(json, fallback);
+    return fallback;
+}
+
+template <typename T>
+void StoreJson(const std::filesystem::path& path, const T& value)
+{
+    if (!path.parent_path().empty())
+        std::filesystem::create_directories(path.parent_path());
+    const auto temporary = path.string() + ".tmp-" + std::to_string(getpid());
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        output << unitree::common::ToJsonString(value, true) << '\n';
+        if (!output)
+            throw std::runtime_error("cannot write " + path.string());
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error("cannot replace " + path.string() + ": " +
+                                 error.message());
+    }
+}
+
 class PoseStore
 {
 public:
-    explicit PoseStore(std::filesystem::path path) : path_(std::move(path))
+    explicit PoseStore(std::filesystem::path path)
+        : path_(std::move(path)), poses_(LoadJson<std::vector<Pose>>(path_))
     {
-        if (!std::filesystem::exists(path_))
-            return;
-        std::ifstream input(path_);
-        if (!input)
-            throw std::runtime_error("cannot read pose file " + path_.string());
-        const std::string json{std::istreambuf_iterator<char>(input), {}};
-        unitree::common::FromJsonString(json, poses_);
         if (!std::all_of(poses_.begin(), poses_.end(),
                          [](const Pose& pose) { return Valid(pose); }))
             throw std::runtime_error("pose file contains invalid data");
@@ -182,24 +210,7 @@ private:
 
     void Commit(std::vector<Pose> updated)
     {
-        if (!path_.parent_path().empty())
-            std::filesystem::create_directories(path_.parent_path());
-        const auto temporary = path_.string() + ".tmp-" +
-                               std::to_string(getpid());
-        {
-            std::ofstream output(temporary, std::ios::trunc);
-            output << unitree::common::ToJsonString(updated, true) << '\n';
-            if (!output)
-                throw std::runtime_error("cannot write pose file " +
-                                         path_.string());
-        }
-        std::error_code error;
-        std::filesystem::rename(temporary, path_, error);
-        if (error) {
-            std::filesystem::remove(temporary);
-            throw std::runtime_error("cannot replace pose file: " +
-                                     error.message());
-        }
+        StoreJson(path_, updated);
         poses_ = std::move(updated);
     }
 
@@ -207,6 +218,35 @@ private:
     mutable std::mutex mutex_;
     std::vector<Pose> poses_;
     uint64_t id_counter_{0};
+};
+
+class SettingsStore
+{
+public:
+    explicit SettingsStore(std::filesystem::path path)
+        : path_(std::move(path)), settings_(LoadJson(path_, HandSettings{}))
+    {
+        if (!ValidSettings(settings_))
+            throw std::runtime_error("settings file contains invalid data");
+    }
+
+    HandSettings Get() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return settings_;
+    }
+
+    void Set(const HandSettings& settings)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        StoreJson(path_, settings);
+        settings_ = settings;
+    }
+
+private:
+    std::filesystem::path path_;
+    mutable std::mutex mutex_;
+    HandSettings settings_;
 };
 
 }  // namespace rh56

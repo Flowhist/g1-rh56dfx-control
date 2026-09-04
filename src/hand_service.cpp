@@ -1,6 +1,6 @@
 #include "rh56/hand_api.hpp"
 #include "rh56/hand_controller.hpp"
-#include "rh56/pose_store.hpp"
+#include "rh56/persistent_store.hpp"
 
 #include <unitree/idl/go2/MotorCmds_.hpp>
 #include <unitree/idl/go2/MotorStates_.hpp>
@@ -42,6 +42,7 @@ struct Config {
     std::string hand{"both"};
     std::string network;
     std::filesystem::path poses_file;
+    std::filesystem::path settings_file;
     bool execute{false};
 };
 
@@ -87,6 +88,7 @@ Config ParseArgs(int argc, char** argv)
 {
     Config config;
     config.poses_file = ProjectRoot(argv[0]) / "data" / "hand_poses.json";
+    config.settings_file = ProjectRoot(argv[0]) / "data" / "hand_settings.json";
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "--execute") {
@@ -127,7 +129,8 @@ std::vector<int32_t> Integers(const T& values)
 class HandRuntime
 {
 public:
-    explicit HandRuntime(const Config& config) : poses_(config.poses_file)
+    explicit HandRuntime(const Config& config)
+        : poses_(config.poses_file), settings_(config.settings_file)
     {
         if (config.hand == "right" || config.hand == "both")
             right_ = MakeController(kRightDevice);
@@ -252,6 +255,8 @@ public:
         reply.current = Integers(state.current);
         reply.force_limit = Integers(state.force_limit);
         reply.current_limit = Integers(state.current_limit);
+        reply.contact.assign(state.contact.begin(), state.contact.end());
+        reply.contact_monitoring = state.contact_monitoring;
         reply.error = Integers(state.error);
         reply.status = Integers(state.status);
         reply.temperature = Integers(state.temperature);
@@ -312,6 +317,26 @@ public:
             return reply;
         } catch (const std::invalid_argument& error) {
             return Fail(reply, rh56::ResultCode::kInvalidArgument, error.what());
+        } catch (const std::exception& error) {
+            return Fail(reply, rh56::ResultCode::kStorageError, error.what());
+        }
+    }
+
+    rh56::SettingsMessage Settings(const rh56::SettingsMessage& request)
+    {
+        rh56::SettingsMessage reply;
+        reply.request_id = request.request_id;
+        try {
+            if (request.write) {
+                const auto& value = request.settings;
+                if (!rh56::ValidSettings(value))
+                    return Fail(reply, rh56::ResultCode::kInvalidArgument,
+                                "invalid persistent hand settings");
+                settings_.Set(value);
+            }
+            reply.settings = settings_.Get();
+            reply.message = "ok";
+            return reply;
         } catch (const std::exception& error) {
             return Fail(reply, rh56::ResultCode::kStorageError, error.what());
         }
@@ -418,8 +443,8 @@ public:
     {
         ApplyDdsCommands();
         ApplyWatchdogs();
-        Refresh(right_.get(), iteration);
-        Refresh(left_.get(), iteration);
+        Refresh(right_.get(), 0, iteration);
+        Refresh(left_.get(), 1, iteration);
         PublishState();
     }
 
@@ -633,7 +658,15 @@ private:
             LogFailure("left command watchdog", left_->HoldCurrent());
     }
 
-    static void Refresh(rh56::HandController* controller, uint64_t iteration)
+    bool HandIdle(std::size_t index) const
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        return (!dds_.received || dds_.timed_out[index]) &&
+               !rpc_watchdogs_[index].active;
+    }
+
+    void Refresh(rh56::HandController* controller, std::size_t index,
+                 uint64_t iteration)
     {
         if (!controller)
             return;
@@ -641,6 +674,10 @@ private:
                                 ? controller->RefreshState()
                                 : controller->RefreshPosition();
         LogFailure("state refresh", result);
+        if (iteration % 5 == 0)
+            LogFailure("force refresh", controller->RefreshForce(
+                HandIdle(index),
+                static_cast<int16_t>(settings_.Get().contact_threshold)));
     }
 
     void PublishState()
@@ -702,6 +739,7 @@ private:
     std::unique_ptr<rh56::HandController> right_;
     std::unique_ptr<rh56::HandController> left_;
     rh56::PoseStore poses_;
+    rh56::SettingsStore settings_;
     std::shared_ptr<CommandSubscriber> command_subscriber_;
     std::shared_ptr<StatePublisher> state_publisher_;
     std::mutex control_mutex_;
@@ -733,6 +771,8 @@ public:
             rh56::kApiHold, &HandRpcServer::HandleHold);
         UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(
             rh56::kApiPoses, &HandRpcServer::HandlePoses);
+        UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(
+            rh56::kApiSettings, &HandRpcServer::HandleSettings);
     }
 
 private:
@@ -778,6 +818,13 @@ private:
         return Handle<rh56::PoseRequest>(
             parameter, data,
             [this](const auto& request) { return runtime_.Poses(request); });
+    }
+
+    int32_t HandleSettings(const std::string& parameter, std::string& data)
+    {
+        return Handle<rh56::SettingsMessage>(
+            parameter, data,
+            [this](const auto& request) { return runtime_.Settings(request); });
     }
 
     template <typename Request, typename Handler>
